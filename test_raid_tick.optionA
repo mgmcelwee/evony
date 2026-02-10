@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------------------
+# Config (override via env vars if you want)
+# -----------------------------------------
+DB_PATH="${DB_PATH:-/home/mmcelwee/evony/data/game.db}"
+BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
+TOKEN="${TOKEN:-${EVONY_TOKEN:-}}"
+ADMIN_KEY="${ADMIN_KEY:-Mathew-evony-admin-9f3c7d2a11}"
+
+ATTACKER_CITY_ID="${ATTACKER_CITY_ID:-1}"
+TARGET_CITY_ID="${TARGET_CITY_ID:-2}"
+CARRY_CAPACITY="${CARRY_CAPACITY:-1500}"
+TRAVEL_SECONDS="${TRAVEL_SECONDS:-10}"
+
+# Optional: drain attacker so Stage 2 credit is visible (set to 0 to disable)
+DRAIN_ATTACKER="${DRAIN_ATTACKER:-1}"
+DRAIN_FOOD="${DRAIN_FOOD:-2000}"
+DRAIN_WOOD="${DRAIN_WOOD:-2000}"
+DRAIN_STONE="${DRAIN_STONE:-1200}"
+DRAIN_IRON="${DRAIN_IRON:-800}"
+
+# Wait buffers
+ARRIVAL_SLEEP="${ARRIVAL_SLEEP:-12}"   # should be > TRAVEL_SECONDS
+RETURN_SLEEP="${RETURN_SLEEP:-8}"      # should be > return_seconds for your buffs
+
+if [[ -z "$TOKEN" ]]; then
+  echo "ERROR: TOKEN env var is not set."
+  echo "Example: export TOKEN='...'"
+  exit 1
+fi
+
+echo "== Raid Tick Test =="
+echo "DB_PATH=$DB_PATH"
+echo "BASE_URL=$BASE_URL"
+echo "ATTACKER_CITY_ID=$ATTACKER_CITY_ID"
+echo "TARGET_CITY_ID=$TARGET_CITY_ID"
+echo "CARRY_CAPACITY=$CARRY_CAPACITY"
+echo "TRAVEL_SECONDS=$TRAVEL_SECONDS"
+echo
+
+# -----------------------------
+# Helpers
+# -----------------------------
+sql() {
+  sqlite3 "$DB_PATH" "$1"
+}
+
+tick() {
+  curl -s -X POST "$BASE_URL/game/tick" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "X-Admin-Key: $ADMIN_KEY"
+}
+
+get_city_row() {
+  local cid="$1"
+  sql "SELECT id,food,wood,stone,iron,max_food,max_wood,max_stone,max_iron,
+              protected_food,protected_wood,protected_stone,protected_iron
+       FROM cities WHERE id=$cid;"
+}
+
+get_city_resources_compact() {
+  local cid="$1"
+  # food|wood|stone|iron|max_food|max_wood|max_stone|max_iron
+  sql "SELECT food,wood,stone,iron,max_food,max_wood,max_stone,max_iron
+       FROM cities WHERE id=$cid;"
+}
+
+get_city_protected_compact() {
+  local cid="$1"
+  # protected_food|protected_wood|protected_stone|protected_iron
+  sql "SELECT protected_food,protected_wood,protected_stone,protected_iron
+       FROM cities WHERE id=$cid;"
+}
+
+get_city_resources_only() {
+  local cid="$1"
+  # food|wood|stone|iron
+  sql "SELECT food,wood,stone,iron
+       FROM cities WHERE id=$cid;"
+}
+
+get_raid_loot_compact() {
+  local rid="$1"
+  # stolen_food|stolen_wood|stolen_stone|stolen_iron
+  sql "SELECT stolen_food,stolen_wood,stolen_stone,stolen_iron
+       FROM raids WHERE id=$rid;"
+}
+
+get_raid_row() {
+  local rid="$1"
+  sql "SELECT id,status,outbound_seconds,return_seconds,
+              stolen_food,stolen_wood,stolen_stone,stolen_iron,
+              created_at,arrives_at,returns_at,resolved_at
+       FROM raids WHERE id=$rid;"
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if ! grep -q "$needle" <<<"$haystack"; then
+    echo "ASSERT FAILED: expected output to contain: $needle"
+    echo "---- output ----"
+    echo "$haystack"
+    echo "----------------"
+    exit 1
+  fi
+}
+
+drain_attacker() {
+  local cid="$ATTACKER_CITY_ID"
+  sql "
+    UPDATE cities
+    SET
+      food  = MAX(0, food  - $DRAIN_FOOD),
+      wood  = MAX(0, wood  - $DRAIN_WOOD),
+      stone = MAX(0, stone - $DRAIN_STONE),
+      iron  = MAX(0, iron  - $DRAIN_IRON)
+    WHERE id=$cid;
+  "
+}
+
+# ---------------------------------------------------------
+# Option B: Freeze production by syncing last_tick_at to now
+# ---------------------------------------------------------
+sync_last_tick_now() {
+  echo "== Freezing production (set last_tick_at=now) for deterministic assertions =="
+  sql "UPDATE cities
+       SET last_tick_at = datetime('now')
+       WHERE id IN ($ATTACKER_CITY_ID, $TARGET_CITY_ID);"
+  # Debug: show last_tick_at so you can verify it moved
+  sql "SELECT id,last_tick_at FROM cities WHERE id IN ($ATTACKER_CITY_ID,$TARGET_CITY_ID);"
+  echo
+}
+
+# -----------------------------
+# Snapshot resources BEFORE
+# -----------------------------
+echo "== City resources BEFORE =="
+echo "Attacker:"
+get_city_row "$ATTACKER_CITY_ID"
+echo "Target:"
+get_city_row "$TARGET_CITY_ID"
+echo
+
+# Freeze production immediately (so the *drain* isn't followed by production noise later)
+sync_last_tick_now
+
+# -----------------------------
+# Optional: drain attacker so Stage 2 credit is visible
+# -----------------------------
+if [[ "$DRAIN_ATTACKER" == "1" ]]; then
+  echo "== Draining attacker so Stage 2 credit is visible =="
+  drain_attacker
+  echo "Attacker AFTER drain:"
+  get_city_row "$ATTACKER_CITY_ID"
+  echo
+fi
+
+# -----------------------------
+# Clear old raids
+# -----------------------------
+echo "== Clearing old raids involving test cities =="
+sql "DELETE FROM raids WHERE attacker_city_id=$ATTACKER_CITY_ID OR target_city_id=$TARGET_CITY_ID;"
+echo
+
+# -----------------------------
+# Create raid
+# -----------------------------
+echo "== Creating raid =="
+RID=$(
+  curl -s -X POST "$BASE_URL/raids" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"attacker_city_id\":$ATTACKER_CITY_ID,\"target_city_id\":$TARGET_CITY_ID,\"carry_capacity\":$CARRY_CAPACITY,\"travel_seconds\":$TRAVEL_SECONDS}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['raid_id'])"
+)
+
+echo "RID=$RID"
+echo
+echo "== Raid row right after create (expect enroute) =="
+get_raid_row "$RID"
+echo
+
+# -----------------------------
+# Wait past arrival and run tick (Stage 1)
+# -----------------------------
+echo "== Sleeping $ARRIVAL_SLEEP seconds (past arrives_at) =="
+sleep "$ARRIVAL_SLEEP"
+echo
+
+# Freeze production RIGHT BEFORE the tick (this is the important one)
+sync_last_tick_now
+
+# Snapshot target BEFORE Stage 1 (resources + protected floors)
+TARGET_BEFORE_STAGE1="$(get_city_resources_only "$TARGET_CITY_ID")"
+TARGET_PROTECTED="$(get_city_protected_compact "$TARGET_CITY_ID")"
+export TARGET_BEFORE_STAGE1 TARGET_PROTECTED
+
+echo "== Stage 1 tick (arrival -> returning) =="
+T1="$(tick)"
+echo "$T1" | jq .
+echo
+
+echo "== Raid row after Stage 1 tick (expect returning + loot saved) =="
+RAID_AFTER_STAGE1="$(get_raid_row "$RID")"
+echo "$RAID_AFTER_STAGE1"
+echo
+
+assert_contains "$RAID_AFTER_STAGE1" "|returning|"
+
+# Stage 1 deterministic assertion:
+# target_after == max(protected, target_before - stolen_loot)
+LOOT_STAGE1="$(get_raid_loot_compact "$RID")"
+TARGET_AFTER_STAGE1="$(get_city_resources_only "$TARGET_CITY_ID")"
+export LOOT_STAGE1 TARGET_AFTER_STAGE1
+
+python3 - <<'PY'
+import os
+
+before = list(map(int, os.environ["TARGET_BEFORE_STAGE1"].split("|")))      # food,wood,stone,iron
+after  = list(map(int, os.environ["TARGET_AFTER_STAGE1"].split("|")))       # food,wood,stone,iron
+loot   = list(map(int, os.environ["LOOT_STAGE1"].split("|")))               # stolen_food,wood,stone,iron
+prot   = list(map(int, os.environ["TARGET_PROTECTED"].split("|")))          # protected_food,wood,stone,iron
+
+bf, bw, bs, bi = before
+af, aw, aS, ai = after
+lf, lw, ls, li = loot
+pf, pw, ps, pi = prot
+
+# what Stage 1 should do (per resource):
+# subtract loot, then clamp to protected minimum
+ef = max(pf, bf - lf)
+ew = max(pw, bw - lw)
+es = max(ps, bs - ls)
+ei = max(pi, bi - li)
+
+print("== Stage 1 target decrease assertion (Option B: production frozen) ==")
+print("Target BEFORE:", bf, bw, bs, bi)
+print("Loot taken:   ", lf, lw, ls, li)
+print("Protected:    ", pf, pw, ps, pi)
+print("Target AFTER: ", af, aw, aS, ai)
+print("Expect AFTER: ", ef, ew, es, ei)
+
+if (af, aw, aS, ai) != (ef, ew, es, ei):
+    raise SystemExit("ASSERT FAILED: target resources after Stage 1 != expected (before - loot, floored at protected)")
+print("✅ Stage 1 target decrease matches loot (floored at protected).")
+PY
+
+echo "== Target city AFTER Stage 1 (should be >= protected_*) =="
+get_city_row "$TARGET_CITY_ID"
+echo
+
+# -----------------------------
+# Wait past return and run tick (Stage 2)
+# -----------------------------
+echo "== Sleeping $RETURN_SLEEP seconds (past returns_at) =="
+sleep "$RETURN_SLEEP"
+echo
+
+# Freeze production RIGHT BEFORE Stage 2 tick too
+sync_last_tick_now
+
+ATTACKER_BEFORE_STAGE2="$(get_city_resources_compact "$ATTACKER_CITY_ID")"
+LOOT_STAGE2="$(get_raid_loot_compact "$RID")"
+export ATTACKER_BEFORE_STAGE2 LOOT_STAGE2
+
+echo "== Stage 2 tick (returning -> resolved, credit attacker) =="
+T2="$(tick)"
+echo "$T2" | jq .
+echo
+
+echo "== Raid row after Stage 2 tick (expect resolved) =="
+RAID_AFTER_STAGE2="$(get_raid_row "$RID")"
+echo "$RAID_AFTER_STAGE2"
+echo
+
+assert_contains "$RAID_AFTER_STAGE2" "|resolved|"
+
+echo "== Attacker city AFTER Stage 2 (should have increased resources, capped by max) =="
+get_city_row "$ATTACKER_CITY_ID"
+echo
+
+ATTACKER_AFTER_STAGE2="$(get_city_resources_compact "$ATTACKER_CITY_ID")"
+export ATTACKER_AFTER_STAGE2
+
+python3 - <<'PY'
+import os
+
+before = list(map(int, os.environ["ATTACKER_BEFORE_STAGE2"].split("|")))
+after  = list(map(int, os.environ["ATTACKER_AFTER_STAGE2"].split("|")))
+loot   = list(map(int, os.environ["LOOT_STAGE2"].split("|")))
+
+bf, bw, bs, bi, bmf, bmw, bms, bmi = before
+af, aw, aS, ai, amf, amw, ams, ami = after
+lf, lw, ls, li = loot
+
+ef = min(amf, bf + lf)
+ew = min(amw, bw + lw)
+es = min(ams, bs + ls)
+ei = min(ami, bi + li)
+
+print("== Stage 2 credit assertion (Option B: production frozen) ==")
+print("Before:", bf, bw, bs, bi)
+print("Loot:  ", lf, lw, ls, li)
+print("After: ", af, aw, aS, ai)
+print("Expect:", ef, ew, es, ei)
+
+if (af, aw, aS, ai) != (ef, ew, es, ei):
+    raise SystemExit("ASSERT FAILED: attacker resources after Stage 2 != expected (loot + caps)")
+print("✅ Stage 2 credit matches loot (+ caps).")
+PY
+
+python3 - <<'PY'
+import os
+
+before = list(map(int, os.environ["TARGET_BEFORE_STAGE1"].split("|")))      # food,wood,stone,iron
+after  = list(map(int, os.environ["TARGET_AFTER_STAGE1"].split("|")))       # food,wood,stone,iron
+loot   = list(map(int, os.environ["LOOT_STAGE1"].split("|")))               # stolen_food,wood,stone,iron
+prot   = list(map(int, os.environ["TARGET_PROTECTED"].split("|")))          # protected_food,wood,stone,iron
+
+bf, bw, bs, bi = before
+af, aw, aS, ai = after
+lf, lw, ls, li = loot
+pf, pw, ps, pi = prot
+
+# Actual deltas (what really left the target city)
+df = bf - af
+dw = bw - aw
+ds = bs - aS
+di = bi - ai
+
+# Clamp caps: max removable without going below protected
+cap_f = max(0, bf - pf)
+cap_w = max(0, bw - pw)
+cap_s = max(0, bs - ps)
+cap_i = max(0, bi - pi)
+
+# Expected deltas are stolen, but limited by caps if clamped
+ef = min(lf, cap_f)
+ew = min(lw, cap_w)
+es = min(ls, cap_s)
+ei = min(li, cap_i)
+
+print("== Stage 1 stolen-vs-delta assert (delta == stolen unless clamped) ==")
+
+# Micro-check: tell us which resources clamped
+if lf > cap_f:
+    print("FOOD CLAMPED")
+if lw > cap_w:
+    print("WOOD CLAMPED")
+if ls > cap_s:
+    print("STONE CLAMPED")
+if li > cap_i:
+    print("IRON CLAMPED")
+
+print("Delta: ", df, dw, ds, di)
+print("Stolen:", lf, lw, ls, li)
+print("Caps:  ", cap_f, cap_w, cap_s, cap_i)
+print("Expect:", ef, ew, es, ei)
+
+if (df, dw, ds, di) != (ef, ew, es, ei):
+    raise SystemExit("ASSERT FAILED: target delta != min(stolen, before-protected) (clamp-aware)")
+print("✅ Stage 1 delta matches stolen (with clamp-aware cap).")
+PY
+
+echo "✅ Done. Raid $RID progressed: enroute -> returning -> resolved."

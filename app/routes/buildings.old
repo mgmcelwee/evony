@@ -1,0 +1,132 @@
+# app/routes/buildings.py
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models.city import City
+from app.models.building import Building
+from app.models.upgrade import Upgrade
+from app.routes.auth import get_current_user
+
+router = APIRouter(prefix="/cities", tags=["buildings"])
+
+
+def upgrade_time_seconds(building_type: str, to_level: int) -> int:
+    """
+    Simple placeholder formula.
+    We'll replace with a real curve later.
+    """
+    base = 30  # seconds
+    growth = 20 * to_level
+    return base + growth
+
+
+def upgrade_cost(building_type: str, to_level: int) -> dict:
+    """
+    Simple placeholder costs.
+    We'll replace with real Evony-like cost curves later.
+    """
+    return {
+        "food": 50 * to_level,
+        "wood": 60 * to_level,
+        "stone": 40 * to_level,
+        "iron": 20 * to_level,
+    }
+
+
+class UpgradeRequest(BaseModel):
+    building_type: str = Field(min_length=2, max_length=32)
+
+
+@router.get("/{city_id}/buildings")
+def list_buildings(
+    city_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> dict:
+    city = db.query(City).filter(City.id == city_id, City.owner_id == current_user.id).first()
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+
+    buildings = db.query(Building).filter(Building.city_id == city_id).all()
+    active = db.query(Upgrade).filter(Upgrade.city_id == city_id).first()
+
+    return {
+        "city_id": city_id,
+        "buildings": [{"type": b.type, "level": b.level} for b in buildings],
+        "active_upgrade": (
+            {
+                "building_type": active.building_type,
+                "from_level": active.from_level,
+                "to_level": active.to_level,
+                "started_at": active.started_at.isoformat(),
+                "completes_at": active.completes_at.isoformat(),
+            }
+            if active
+            else None
+        ),
+    }
+
+
+@router.post("/{city_id}/upgrade")
+def start_upgrade(
+    city_id: int,
+    payload: UpgradeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> dict:
+    city = db.query(City).filter(City.id == city_id, City.owner_id == current_user.id).first()
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+
+    # One builder rule: only one active upgrade at a time per city
+    existing = db.query(Upgrade).filter(Upgrade.city_id == city_id).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upgrade already in progress")
+
+    b = db.query(Building).filter(Building.city_id == city_id, Building.type == payload.building_type).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    to_level = b.level + 1
+
+    cost = upgrade_cost(b.type, to_level)
+    # Check resources
+    if city.food < cost["food"] or city.wood < cost["wood"] or city.stone < cost["stone"] or city.iron < cost["iron"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "Insufficient resources", "cost": cost})
+
+    # Spend resources
+    city.food -= cost["food"]
+    city.wood -= cost["wood"]
+    city.stone -= cost["stone"]
+    city.iron -= cost["iron"]
+
+    started = datetime.utcnow()
+    seconds = upgrade_time_seconds(b.type, to_level)
+    completes = started + timedelta(seconds=seconds)
+
+    up = Upgrade(
+        city_id=city_id,
+        building_type=b.type,
+        from_level=b.level,
+        to_level=to_level,
+        started_at=started,
+        completes_at=completes,
+    )
+    db.add(up)
+    db.commit()
+
+    return {
+        "status": "started",
+        "building_type": b.type,
+        "from_level": b.level,
+        "to_level": to_level,
+        "cost": cost,
+        "completes_at": completes.isoformat(),
+        "duration_seconds": seconds,
+    }

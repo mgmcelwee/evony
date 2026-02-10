@@ -1,0 +1,57 @@
+"""add raid travel fields
+
+Revision ID: a5aba138d576
+Revises: 6390ad624c9b
+Create Date: 2026-02-01 ...
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = "a5aba138d576"
+down_revision: Union[str, Sequence[str], None] = "6390ad624c9b"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # 1) Add columns in a SQLite-safe way:
+    #    - status: NOT NULL is OK if we give a constant server_default
+    #    - arrives_at: add as NULL first (we'll backfill)
+    #    - resolved_at: NULL is fine
+    with op.batch_alter_table("raids") as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "status",
+                sa.String(length=20),
+                nullable=False,
+                server_default="resolved",  # existing rows become resolved
+            )
+        )
+        batch_op.add_column(sa.Column("arrives_at", sa.DateTime(), nullable=True))
+        batch_op.add_column(sa.Column("resolved_at", sa.DateTime(), nullable=True))
+
+    # 2) Backfill existing rows so arrives_at/resolved_at are sane.
+    #    Your raids table already has created_at (from your earlier model).
+    #    Old raids were "instant", so they’re effectively resolved at created_at.
+    op.execute("UPDATE raids SET arrives_at = created_at WHERE arrives_at IS NULL")
+    op.execute("UPDATE raids SET resolved_at = created_at WHERE resolved_at IS NULL")
+
+    # 3) Now enforce NOT NULL for arrives_at (requires batch recreate in SQLite).
+    #    Also (optional) remove the status default if you don’t want it.
+    with op.batch_alter_table("raids") as batch_op:
+        batch_op.alter_column("arrives_at", existing_type=sa.DateTime(), nullable=False)
+        # Optional: keep or remove the default. Keeping is fine.
+        # If you want to remove it, uncomment:
+        # batch_op.alter_column("status", existing_type=sa.String(length=20), server_default=None)
+
+
+def downgrade() -> None:
+    with op.batch_alter_table("raids") as batch_op:
+        batch_op.drop_column("resolved_at")
+        batch_op.drop_column("arrives_at")
+        batch_op.drop_column("status")

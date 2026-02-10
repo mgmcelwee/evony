@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local/dev artifacts
+*.sqlite3
+*.db
+*.log
+*.pid
+*.tmp
+tmp/
+.cache/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Reports/artifacts (adjust if you want to keep them)
+# reports/

@@ -1,0 +1,45 @@
+"""seed troop types
+
+Revision ID: 8e7b8593c0df
+Revises: 4316f3b90b79
+Create Date: 2026-02-04 21:37:14.538913
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '8e7b8593c0df'
+down_revision: Union[str, Sequence[str], None] = '4316f3b90b79'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    troop_types = sa.table(
+        "troop_types",
+        sa.column("code", sa.String),
+        sa.column("name", sa.String),
+        sa.column("tier", sa.Integer),
+        sa.column("attack", sa.Integer),
+        sa.column("defense", sa.Integer),
+        sa.column("hp", sa.Integer),
+        sa.column("speed", sa.Integer),
+        sa.column("carry", sa.Integer),
+    )
+
+    op.bulk_insert(
+        troop_types,
+        [
+            {"code":"t1_inf","name":"T1 Infantry","tier":1,"attack":10,"defense":12,"hp":120,"speed":100,"carry":5},
+            {"code":"t1_rng","name":"T1 Ranged","tier":1,"attack":14,"defense":8,"hp":90,"speed":105,"carry":4},
+            {"code":"t1_cav","name":"T1 Cavalry","tier":1,"attack":16,"defense":9,"hp":100,"speed":120,"carry":6},
+            {"code":"t1_siege","name":"T1 Siege","tier":1,"attack":22,"defense":6,"hp":80,"speed":70,"carry":20},
+        ],
+    )
+
+def downgrade() -> None:
+    op.execute("DELETE FROM troop_types WHERE code IN ('t1_inf','t1_rng','t1_cav','t1_siege')")

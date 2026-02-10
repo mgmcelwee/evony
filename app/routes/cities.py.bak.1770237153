@@ -1,0 +1,192 @@
+# app/routes/buildings.py
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models.city import City
+from app.models.building import Building
+from app.models.upgrade import Upgrade
+from app.routes.auth import get_current_user
+
+router = APIRouter(prefix="/cities", tags=["buildings"])
+
+ADMIN_KEY = os.getenv("ADMIN_KEY", "")
+
+def _is_admin(x_admin_key: str | None) -> bool:
+    return bool(ADMIN_KEY) and bool(x_admin_key) and secrets.compare_digest(x_admin_key, ADMIN_KEY)
+
+# -----------------------------------------
+# Building name normalization (Evony-ish)
+# -----------------------------------------
+
+from app.game.building_rules import (
+    normalize_building_type,
+    display_building_type,
+    accepted_display_types,
+    upgrade_cost,
+    upgrade_time_seconds,
+    check_prereqs,
+)
+
+class UpgradeRequest(BaseModel):
+    building_type: str = Field(min_length=2, max_length=32)
+
+
+@router.get("/{city_id}/buildings")
+def list_buildings(
+    city_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> dict:
+    city = (
+q = db.query(City).filter(City.id == city_id)
+    if not _is_admin(x_admin_key):
+        q = q.filter(City.owner_id == current_user.id)
+
+    city = q.first()
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+    buildings = db.query(Building).filter(Building.city_id == city_id).all()
+    active = db.query(Upgrade).filter(Upgrade.city_id == city_id).first()
+
+    return {
+        "city_id": city_id,
+        "buildings": [
+            {"type": display_building_type(b.type), "level": b.level, "canonical_type": b.type}
+            for b in buildings
+        ],
+        "active_upgrade": (
+            {
+                "building_type": display_building_type(active.building_type),
+                "canonical_type": active.building_type,
+                "from_level": active.from_level,
+                "to_level": active.to_level,
+                "started_at": active.started_at.isoformat(),
+                "completes_at": active.completes_at.isoformat(),
+            }
+            if active
+            else None
+        ),
+        "accepted_building_types": accepted_display_types(),
+    }
+
+
+@router.post("/{city_id}/upgrade")
+def start_upgrade(
+    city_id: int,
+    payload: UpgradeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    q = db.query(City).filter(City.id == city_id)
+    if not _is_admin(x_admin_key):
+        q = q.filter(City.owner_id == current_user.id)
+
+    city = q.first()
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+    # One builder rule: only one active upgrade at a time per city
+    existing = db.query(Upgrade).filter(Upgrade.city_id == city_id).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "Upgrade already in progress",
+                "active": {
+                    "building_type": display_building_type(existing.building_type),
+                    "canonical_type": existing.building_type,
+                    "from_level": existing.from_level,
+                    "to_level": existing.to_level,
+                    "completes_at": existing.completes_at.isoformat(),
+                },
+            },
+        )
+
+    requested = payload.building_type
+    canonical = normalize_building_type(requested)
+
+    b = (
+        db.query(Building)
+        .filter(Building.city_id == city_id, Building.type == canonical)
+        .first()
+    )
+    if not b:
+        # helpful error: show what exists in this city
+        existing_types = [
+            display_building_type(x[0]) for x in db.query(Building.type).filter(Building.city_id == city_id).all()
+        ]
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Building not found",
+                "requested": requested,
+                "canonical": canonical,
+                "available_in_city": sorted(set(existing_types)),
+            },
+        )
+
+    # snapshot current building levels in this city (canonical -> level)
+    buildings = db.query(Building).filter(Building.city_id == city_id).all()
+    levels = {x.type: x.level for x in buildings}
+
+    to_level = b.level + 1
+
+    ok, detail = check_prereqs(building_type=b.type, to_level=to_level, levels=levels)
+    if not ok:
+        # Friendly output using display names
+        if "missing" in detail:
+            for item in detail["missing"]:
+                item["type_display"] = display_building_type(item["type"])
+        raise HTTPException(status_code=400, detail=detail)
+    cost = upgrade_cost(b.type, to_level)
+
+    # Check resources
+    if (
+        city.food < cost["food"]
+        or city.wood < cost["wood"]
+        or city.stone < cost["stone"]
+        or city.iron < cost["iron"]
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Insufficient resources", "cost": cost},
+        )
+
+    # Spend resources
+    city.food -= cost["food"]
+    city.wood -= cost["wood"]
+    city.stone -= cost["stone"]
+    city.iron -= cost["iron"]
+
+    started = datetime.utcnow()
+    seconds = upgrade_time_seconds(b.type, to_level)
+    completes = started + timedelta(seconds=seconds)
+
+    up = Upgrade(
+        city_id=city_id,
+        building_type=b.type,
+        from_level=b.level,
+        to_level=to_level,
+        started_at=started,
+        completes_at=completes,
+    )
+
+    db.add(up)
+    db.commit()
+
+    return {
+        "status": "started",
+        "building_type": display_building_type(b.type),
+        "canonical_type": b.type,
+        "from_level": b.level,
+        "to_level": to_level,
+        "cost": cost,
+        "completes_at": completes.isoformat(),
+        "duration_seconds": seconds,
+    }

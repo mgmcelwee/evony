@@ -1,0 +1,50 @@
+# app/database.py
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Generator
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
+
+# Project root is the parent of the "app" directory
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Store the SQLite DB in a dedicated "data" directory
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = DATA_DIR / "game.db"
+DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
+
+# SQLite specific: needed when using FastAPI/Uvicorn with threads
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    future=True,
+)
+
+# Create sessions
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    future=True,
+)
+
+class Base(DeclarativeBase):
+    """Base class for all SQLAlchemy models."""
+    pass
+
+def get_db() -> Generator[Session, None, None]:
+    """
+    FastAPI dependency that provides a DB session per-request.
+    Usage:
+        def route(db: Session = Depends(get_db)):
+            ...
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
