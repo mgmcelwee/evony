@@ -27,3 +27,5 @@ tmp/
 
 # Reports/artifacts (adjust if you want to keep them)
 # reports/
+.env
+.env
