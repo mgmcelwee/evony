@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.config import ADMIN_KEY
 from app.database import get_db
 from app.models.city import City
+from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.tick_util import tick_world_now
 from app.models.city_troop import CityTroop
@@ -58,6 +59,10 @@ class RatesBlock(BaseModel):
     stone_rate: int = 0
     iron_rate: int = 0
 
+class GovernorBonusBlock(BaseModel):
+    hero_id: int | None = None
+    name: str | None = None
+    governor_production_bonus: int = 0
 
 class CityResponse(BaseModel):
     city_id: int
@@ -68,6 +73,7 @@ class CityResponse(BaseModel):
     caps: ResourceBlock
     protected: ResourceBlock
     lootable: ResourceBlock
+    governor_bonus: GovernorBonusBlock | None = None
     last_tick_at: str | None = None
 
     model_config = {
@@ -139,6 +145,29 @@ class CityTroopsResponse(BaseModel):
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(ADMIN_KEY) and bool(x_admin_key) and secrets.compare_digest(x_admin_key, ADMIN_KEY)
 
+def _get_governor_production_bonus(db: Session, city_id: int) -> dict:
+    governor = (
+        db.query(Hero)
+        .filter(
+            Hero.city_id == int(city_id),
+            Hero.status == "governor",
+        )
+        .first()
+    )
+
+    bonus = (
+        int(getattr(governor, "governor_production_bonus", 0) or 0)
+        if governor
+        else 0
+    )
+
+    bonus = max(0, min(bonus, 90))
+
+    return {
+        "governor": governor,
+        "bonus": bonus,
+    }
+
 @router.get("/{city_id}", response_model=CityResponse)
 def get_city(
     city_id: int,
@@ -157,6 +186,15 @@ def get_city(
     if not city:
         raise HTTPException(status_code=404, detail="City not found")
 
+    gov = _get_governor_production_bonus(db, int(city.id))
+    production_bonus = int(gov["bonus"])
+    mult = (100 + production_bonus) / 100.0
+
+    food_rate = int(city.food_rate * mult)
+    wood_rate = int(city.wood_rate * mult)
+    stone_rate = int(city.stone_rate * mult)
+    iron_rate = int(city.iron_rate * mult)
+
     return {
         "city_id": city.id,
         "name": city.name,
@@ -168,10 +206,10 @@ def get_city(
             "iron": city.iron,
         },
         "rates_per_min": {
-            "food_rate": city.food_rate,
-            "wood_rate": city.wood_rate,
-            "stone_rate": city.stone_rate,
-            "iron_rate": city.iron_rate,
+            "food_rate": food_rate,
+            "wood_rate": wood_rate,
+            "stone_rate": stone_rate,
+            "iron_rate": iron_rate,
         },
         "caps": {
             "max_food": city.max_food,
@@ -191,6 +229,11 @@ def get_city(
             "stone": max(0, city.stone - city.protected_stone),
             "iron": max(0, city.iron - city.protected_iron),
         },
+	"governor_bonus": {
+    	"hero_id": gov["governor"].id if gov["governor"] else None,
+    	"name": gov["governor"].name if gov["governor"] else None,
+    	"governor_production_bonus": production_bonus,
+	},
         "last_tick_at": city.last_tick_at.isoformat() if city.last_tick_at else None,
     }
 
