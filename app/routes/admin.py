@@ -9,6 +9,8 @@ router = APIRouter(
 )
 from sqlalchemy.orm import Session
 
+from pydantic import BaseModel, Field
+
 from app.config import ADMIN_KEY
 from app.database import get_db
 from app.routes.auth import get_current_user
@@ -17,6 +19,7 @@ from app.models.city import City
 from app.models.research import Research
 from app.models.city_troop import CityTroop
 from app.models.troop_type import TroopType
+from app.models.hero import Hero
 
 from app.game.research_rules import RESEARCH
 from app.routes.research import ResearchSetRequest
@@ -30,6 +33,17 @@ from app.routes.training import (
     _check_affordable,
 )
 from app.routes.tick_util import tick_world_now
+
+class HeroSetRequest(BaseModel):
+    name: str = Field(default="Roland", min_length=2, max_length=50)
+    level: int = Field(default=1, ge=1, le=100)
+    xp: int = Field(default=0, ge=0)
+    attack_bonus: int = Field(default=0, ge=0)
+    defense_bonus: int = Field(default=0, ge=0)
+    march_speed_bonus: int = Field(default=0, ge=0)
+    training_speed_bonus: int = Field(default=0, ge=0)
+    research_speed_bonus: int = Field(default=0, ge=0)
+    status: str = Field(default="idle")
 
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(x_admin_key and x_admin_key == ADMIN_KEY)
@@ -274,4 +288,53 @@ def _get_city_or_404(
         raise HTTPException(status_code=404, detail="City not found")
     return city
 
+@router.post("/cities/{city_id}/heroes/set")
+def admin_set_hero(
+    city_id: int,
+    payload: HeroSetRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    if not _is_admin(x_admin_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
+    city = db.query(City).filter(City.id == city_id).first()
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+
+    hero = Hero(
+        city_id=city_id,
+        name=payload.name.strip(),
+        level=payload.level,
+        xp=payload.xp,
+        attack_bonus=payload.attack_bonus,
+        defense_bonus=payload.defense_bonus,
+        march_speed_bonus=payload.march_speed_bonus,
+        training_speed_bonus=payload.training_speed_bonus,
+        research_speed_bonus=payload.research_speed_bonus,
+        status=payload.status.strip(),
+    )
+
+    db.add(hero)
+    db.commit()
+    db.refresh(hero)
+
+    return {
+        "ok": True,
+        "city_id": city_id,
+        "hero": {
+            "id": hero.id,
+            "name": hero.name,
+            "level": hero.level,
+            "xp": hero.xp,
+            "status": hero.status,
+            "bonuses": {
+                "attack": hero.attack_bonus,
+                "defense": hero.defense_bonus,
+                "march_speed": hero.march_speed_bonus,
+                "training_speed": hero.training_speed_bonus,
+                "research_speed": hero.research_speed_bonus,
+            },
+        },
+    }
