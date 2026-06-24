@@ -230,7 +230,7 @@ def train_preview(
 @router.get("/{city_id}/train/queue")
 def get_train_queue(
     city_id: int,
-    status: str | None = Query(default=None),        # optional filter
+    status: str | None = Query(default="training"),    # optional filter
     before_id: int | None = Query(default=None),     # pagination cursor
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),

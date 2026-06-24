@@ -16,13 +16,6 @@ from app.models.research_queue import ResearchQueue
 from app.routes.auth import get_current_user
 from app.routes.buildings import _get_city_or_404
 
-from app.game.research_rules import (
-    RESEARCH,
-    get_research_prereqs,
-    research_cost,
-    research_time_seconds,
-)
-
 router = APIRouter(
     prefix="/cities",
     tags=["research"]
