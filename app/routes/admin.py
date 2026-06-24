@@ -17,6 +17,11 @@ from app.models.city_troop import CityTroop
 from app.models.troop_type import TroopType
 from app.models.hero import Hero
 
+from app.game.hero_specialties import (
+    VALID_HERO_SPECIALTIES,
+    normalize_specialty,
+    calculate_hero_bonuses,
+)
 from app.game.research_rules import RESEARCH
 from app.routes.research import ResearchSetRequest
 from app.routes.cities import TroopsSetPayload
@@ -45,10 +50,7 @@ class HeroSetRequest(BaseModel):
     training_speed_bonus: int = Field(default=0, ge=0)
     research_speed_bonus: int = Field(default=0, ge=0)
     status: str = Field(default="idle")
-    governor_research_speed_bonus: int = Field(default=0, ge=0)
-    governor_training_speed_bonus: int = Field(default=0, ge=0)
-    governor_production_bonus: int = Field(default=0, ge=0)
-    governor_building_speed_bonus: int = Field(default=0, ge=0)
+    specialty: str = Field(default="GENERAL")
 
 class HeroUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=50)
@@ -60,10 +62,7 @@ class HeroUpdateRequest(BaseModel):
     training_speed_bonus: int | None = Field(default=None, ge=0)
     research_speed_bonus: int | None = Field(default=None, ge=0)
     status: str | None = Field(default=None)
-    governor_research_speed_bonus: int | None = Field(default=None, ge=0)
-    governor_training_speed_bonus: int | None = Field(default=None, ge=0)
-    governor_production_bonus: int | None = Field(default=None, ge=0)
-    governor_building_speed_bonus: int | None = Field(default=None, ge=0)
+    specialty: str | None = Field(default=None)
 
 class HeroRenameRequest(BaseModel):
     name: str = Field(default="Roland", min_length=2, max_length=50)
@@ -84,6 +83,7 @@ def _hero_to_dict(hero: Hero) -> dict:
         "level": int(hero.level),
         "xp": int(hero.xp),
         "status": hero.status,
+	"specialty": hero.specialty,
         "bonuses": {
             "attack": int(hero.attack_bonus),
             "defense": int(hero.defense_bonus),
@@ -91,13 +91,8 @@ def _hero_to_dict(hero: Hero) -> dict:
             "training_speed": int(hero.training_speed_bonus),
             "research_speed": int(hero.research_speed_bonus),
         },
-        "governor_bonuses": {
-            "research_speed": int(hero.governor_research_speed_bonus),
-            "training_speed": int(hero.governor_training_speed_bonus),
-            "production": int(hero.governor_production_bonus),
-            "building_speed": int(hero.governor_building_speed_bonus),
-        },    
-}
+	    "governor_bonuses": calculate_hero_bonuses(hero),
+    }
 
 @router.post("/cities/{city_id}/research/set")
 def admin_set_research_level(
@@ -349,6 +344,11 @@ def admin_set_hero(
     if not city:
         raise HTTPException(status_code=404, detail="City not found")
 
+    specialty = normalize_specialty(payload.specialty)
+
+    if specialty not in VALID_HERO_SPECIALTIES:
+        raise HTTPException(status_code=400, detail="Invalid hero specialty")
+
     hero = Hero(
         city_id=city_id,
         name=payload.name.strip(),
@@ -359,10 +359,7 @@ def admin_set_hero(
         march_speed_bonus=payload.march_speed_bonus,
         training_speed_bonus=payload.training_speed_bonus,
         research_speed_bonus=payload.research_speed_bonus,
-        governor_research_speed_bonus=payload.governor_research_speed_bonus,
-        governor_training_speed_bonus=payload.governor_training_speed_bonus,
-        governor_production_bonus=payload.governor_production_bonus,
-        governor_building_speed_bonus=payload.governor_building_speed_bonus,
+	specialty=specialty,
         status=payload.status.strip(),
     )
 
@@ -413,6 +410,10 @@ def admin_update_hero(
     for field, value in data.items():
         if isinstance(value, str):
             value = value.strip()
+
+        if field == "specialty":
+            value = normalize_specialty(value)
+
         setattr(hero, field, value)
 
     db.commit()

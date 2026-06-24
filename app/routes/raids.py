@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import math
 import secrets
-import os
 import html
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, List
+from typing import Any, Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import HTMLResponse
@@ -27,6 +26,7 @@ from app.models.raid_defender_troop import RaidDefenderTroop
 from app.routes.auth import get_current_user
 from app.routes.tick_util import tick_world_now
 from app.game.tick import _recalc_storage_for_city, _lootable, _proportional_take
+from app.game.governor import get_city_governor_bonus
 
 router = APIRouter(prefix="/raids", tags=["raids"])
 
@@ -36,6 +36,10 @@ RECALL_RETURN_FACTOR = 0.5
 # 0.5 = twice as fast on the way home when recalling a returning march.
 # 1.0 = no speedup
 # 0.25 = 4x speedup
+
+class TroopSendItem(BaseModel):
+    code: str = Field(default="t1_inf", min_length=1, max_length=32)
+    count: int = Field(default=10, ge=1)
 
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(ADMIN_KEY) and bool(x_admin_key) and secrets.compare_digest(x_admin_key, ADMIN_KEY)
@@ -435,11 +439,6 @@ def _loss_pct(lost: int, start: int) -> float:
 def _round2(x: float) -> float:
     return round(float(x), 2)
 
-class TroopSendItem(BaseModel):
-    code: str = Field(default="t1_inf", min_length=1, max_length=32)
-    count: int = Field(default=10, ge=1)
-
-
 class RaidCreateRequest(BaseModel):
     attacker_city_id: int = Field(default=1, ge=1)
     target_city_id: int = Field(default=2, ge=1)
@@ -561,9 +560,6 @@ def create_raid(
     if not attacker:
         raise HTTPException(status_code=404, detail="Attacker city not found")
 
-    # Admin flag (used for cap bypass + carry override)
-    is_admin = (x_admin_key == ADMIN_KEY)
-
     # --------------------------------------------------
     # Age 1: Limit simultaneous raids (Keep-based)
     # --------------------------------------------------
@@ -571,7 +567,7 @@ def create_raid(
     max_allowed = _max_simultaneous_raids(db, attacker.id)
     active_raids = _active_raids_count(db, attacker.id)
 
-    if active_raids >= max_allowed and not is_admin:
+    if active_raids >= max_allowed:
         raise HTTPException(
             status_code=409,
             detail={
@@ -636,16 +632,20 @@ def create_raid(
         # --------------------------------------------------
         # 1) Base travel time (distance -> seconds)
         # --------------------------------------------------
-        if payload.travel_seconds is None:
-            base_seconds = _compute_travel_seconds(
-                _distance_tiles(attacker, target),
-                SECONDS_PER_TILE_DEFAULT,
-            )
-        else:
-            base_seconds = int(payload.travel_seconds)
+        base_seconds = _compute_travel_seconds(
+            _distance_tiles(attacker, target),
+            SECONDS_PER_TILE_DEFAULT,
+        )
 
         # Scale by slowest troop speed
         base_seconds = _compute_seconds_from_troop_speed(base_seconds, slowest_speed)
+
+        governor, governor_bonuses = get_city_governor_bonus(db, int(attacker.id))
+
+        march_speed_bonus = int(governor_bonuses.get("march_speed_bonus", 0) * 100)
+        march_speed_bonus = max(0, min(march_speed_bonus, 90))
+
+        base_seconds = _apply_speed_pct(base_seconds, march_speed_bonus)
 
         # --------------------------------------------------
         # 2) Apply city buffs + schedule timestamps
@@ -663,11 +663,6 @@ def create_raid(
         # --------------------------------------------------
         barracks_cap = _carry_capacity_from_barracks(db, attacker.id)
         carry_capacity = int(min(int(barracks_cap), int(computed_army_carry)))
-
-        if payload.carry_capacity is not None:
-            if not is_admin:
-                raise HTTPException(status_code=403, detail="Forbidden")
-            carry_capacity = int(payload.carry_capacity)
 
         # --------------------------------------------------
         # 4) Create raid row
@@ -721,6 +716,11 @@ def create_raid(
             "troop_speed_slowest": int(troop_debug["slowest_speed"]),
             "army_carry_capacity": int(troop_debug["computed_carry_capacity"]),
             "barracks_carry_cap": int(barracks_cap),
+	    "governor_bonus": {
+    	        "hero_id": governor.id if governor else None,
+    	        "name": governor.name if governor else None,
+    	        "march_speed_bonus": march_speed_bonus,
+	    },
         }
 
     except HTTPException:
@@ -932,6 +932,12 @@ def _build_combat_report(
     attacker = db.query(City).filter(City.id == raid.attacker_city_id).first()
     target = db.query(City).filter(City.id == raid.target_city_id).first()
 
+    attacker_governor, attacker_bonuses = get_city_governor_bonus(db, int(raid.attacker_city_id))
+    defender_governor, defender_bonuses = get_city_governor_bonus(db, int(raid.target_city_id))
+
+    attack_bonus = float(attacker_bonuses.get("attack_bonus", 0) or 0)
+    defense_bonus = float(defender_bonuses.get("defense_bonus", 0) or 0)
+
     # -----------------------------
     # Attacker troop lines (sent/lost) + troop metadata
     # -----------------------------
@@ -1078,7 +1084,8 @@ def _build_combat_report(
     attacker_damage_breakdown: list[dict] = []
 
     for t in attacker_troops:
-        unit_power = float(t["stats"]["attack"]) + 0.10 * float(t["stats"]["hp"])
+        base_unit_power = float(t["stats"]["attack"]) + 0.10 * float(t["stats"]["hp"])
+        unit_power = base_unit_power * (1.0 + attack_bonus)
         sent = int(t["sent"])
         lost = int(t["lost"])
         returning = int(t["returning"])
@@ -1117,7 +1124,8 @@ def _build_combat_report(
 
     if has_snapshot:
         for t in defender_troops:
-            unit_power = float(t["stats"]["defense"]) + 0.10 * float(t["stats"]["hp"])
+            base_unit_power = float(t["stats"]["defense"]) + 0.10 * float(t["stats"]["hp"])
+            unit_power = base_unit_power * (1.0 + defense_bonus)
             start = int(t["start"])
             lost = int(t["lost"])
             remaining = int(t["remaining"])
@@ -1183,6 +1191,18 @@ def _build_combat_report(
                 "power_remaining": _round2(defender_power_start - defender_power_lost),
             }
         ),
+        "hero_bonuses": {
+            "attacker": {
+                "hero_id": attacker_governor.id if attacker_governor else None,
+                "name": attacker_governor.name if attacker_governor else None,
+                "attack_bonus": attack_bonus,
+            },
+            "defender": {
+                "hero_id": defender_governor.id if defender_governor else None,
+                "name": defender_governor.name if defender_governor else None,
+                "defense_bonus": defense_bonus,
+            },
+        },
         "expected_rates": expected,
         "outcome_hint": outcome_hint,
         "notes": [

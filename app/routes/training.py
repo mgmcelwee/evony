@@ -13,13 +13,13 @@ from pydantic import BaseModel, Field
 from app.config import ADMIN_KEY
 from app.database import get_db
 from app.models.city import City
-from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.tick_util import tick_world_now
 from app.models.city_troop import CityTroop
 from app.models.troop_type import TroopType
 from app.models.building import Building
 from app.models.training_queue import TrainingQueue
+from app.game.governor import get_city_governor_bonus
 from app.game.tick import _recalc_storage_for_city
 
 router = APIRouter(prefix="/cities", tags=["training"])
@@ -150,21 +150,10 @@ def _check_affordable(city: City, cost: dict) -> dict:
             missing[k] = int(v) - have[k]
     return {"ok": (len(missing) == 0), "have": have, "missing": missing}
 
-def _get_governor_training_bonus(db: Session, city_id: int) -> dict:
-    governor = (
-        db.query(Hero)
-        .filter(
-            Hero.city_id == int(city_id),
-            Hero.status == "governor",
-        )
-        .first()
-    )
+def _get_city_training_bonus(db: Session, city_id: int) -> dict:
+    governor, bonuses = get_city_governor_bonus(db, int(city_id))
 
-    bonus = (
-        int(getattr(governor, "governor_training_speed_bonus", 0) or 0)
-        if governor
-        else 0
-    )
+    bonus = int(bonuses.get("training_speed_bonus", 0) * 100)
     bonus = max(0, min(bonus, 90))
 
     return {
@@ -273,7 +262,7 @@ def train_preview(
         "governor_bonus": {
             "hero_id": gov["governor"].id if gov["governor"] else None,
             "name": gov["governor"].name if gov["governor"] else None,
-            "governor_training_speed_bonus": gov["bonus"],
+            "training_speed_bonus": gov["bonus"],
         },
     }
 
@@ -611,11 +600,6 @@ def train_queue(
         "total_cost": total_cost,
 	"base_duration_seconds": int(base_duration_seconds),
 	"duration_seconds": int(duration_seconds),
-	"governor_bonus": {
-	    "hero_id": gov["governor"].id if gov["governor"] else None,
-	    "name": gov["governor"].name if gov["governor"] else None,
-	    "governor_training_speed_bonus": int(gov["bonus"]),
-	},
 	"resources_after": {
             "food": int(city.food),
             "wood": int(city.wood),
@@ -631,7 +615,7 @@ def train_queue(
         "governor_bonus": {
             "hero_id": gov["governor"].id if gov["governor"] else None,
             "name": gov["governor"].name if gov["governor"] else None,
-            "governor_training_speed_bonus": gov["bonus"],
+            "training_speed_bonus": gov["bonus"],
         },
     }
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.game.governor import get_city_governor_bonus
 from app.constants import MAX_LEVEL
 from app.database import get_db
 from app.models.building import Building
@@ -158,21 +159,9 @@ def preview_research(
     cost = research_cost(key, to_level)
     base_seconds = research_time_seconds(key, to_level)
 
-    governor = (
-        db.query(Hero)
-        .filter(
-            Hero.city_id == city_id,
-            Hero.status == "governor",
-        )
-        .first()
-    )
+    governor, governor_bonuses = get_city_governor_bonus(db, int(city.id))
 
-    research_bonus = (
-        int(getattr(governor, "governor_research_speed_bonus", 0) or 0)
-        if governor
-        else 0
-    )
-
+    research_bonus = int(governor_bonuses.get("research_speed_bonus", 0) * 100)
     research_bonus = max(0, min(research_bonus, 90))
 
     seconds = max(
@@ -202,7 +191,7 @@ def preview_research(
         "governor_bonus": {
             "hero_id": governor.id if governor else None,
             "name": governor.name if governor else None,
-            "governor_research_speed_bonus": research_bonus,
+            "research_speed_bonus": research_bonus,
         },
         "resources": {
             "food": city.food,
@@ -466,21 +455,9 @@ def start_research(
 
     base_seconds = research_time_seconds(key, to_level)
 
-    governor = (
-        db.query(Hero)
-        .filter(
-            Hero.city_id == city_id,
-            Hero.status == "governor",
-        )
-        .first()
-    )
+    governor, governor_bonuses = get_city_governor_bonus(db, int(city.id))
 
-    research_bonus = (
-        int(getattr(governor, "governor_research_speed_bonus", 0) or 0)
-        if governor
-        else 0
-    )
-
+    research_bonus = int(governor_bonuses.get("research_speed_bonus", 0) * 100)
     research_bonus = max(0, min(research_bonus, 90))
 
     seconds = max(
@@ -518,7 +495,7 @@ def start_research(
         "governor_bonus": {
             "hero_id": governor.id if governor else None,
             "name": governor.name if governor else None,
-            "governor_research_speed_bonus": research_bonus,
+            "research_speed_bonus": research_bonus,
         },
         "duration_seconds": seconds,
         "finishes_at": finishes.isoformat(),

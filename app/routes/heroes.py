@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.buildings import _get_city_or_404
-
+from app.game.hero_specialties import calculate_hero_bonuses
 
 router = APIRouter(
     prefix="/cities",
@@ -23,6 +23,7 @@ def _hero_to_dict(hero: Hero) -> dict:
         "level": int(hero.level),
         "xp": int(hero.xp),
         "status": hero.status,
+	"specialty": hero.specialty,
         "bonuses": {
             "attack": int(hero.attack_bonus),
             "defense": int(hero.defense_bonus),
@@ -30,12 +31,7 @@ def _hero_to_dict(hero: Hero) -> dict:
             "training_speed": int(hero.training_speed_bonus),
             "research_speed": int(hero.research_speed_bonus),
         },
-        "governor_bonuses": {
-            "research_speed": int(hero.governor_research_speed_bonus),
-            "training_speed": int(hero.governor_training_speed_bonus),
-            "production": int(hero.governor_production_bonus),
-	    "building_speed": int(hero.governor_building_speed_bonus),
-        },
+	"governor_bonuses": calculate_hero_bonuses(hero),
     }
 
 class HeroCreateRequest(BaseModel):
@@ -88,6 +84,7 @@ def create_hero(
             "level": int(hero.level),
             "xp": int(hero.xp),
             "status": hero.status,
+	    "specialty": hero.specialty,
         },
     }
 

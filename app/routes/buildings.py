@@ -15,9 +15,9 @@ from app.database import get_db
 from app.models.city import City
 from app.models.building import Building
 from app.models.upgrade import Upgrade
-from app.models.hero import Hero
 from app.routes.auth import get_current_user
 
+from app.game.governor import get_city_governor_bonus
 from app.game.building_rules import (
     normalize_building_type,
     display_building_type,
@@ -31,21 +31,10 @@ router = APIRouter(prefix="/cities", tags=["buildings"])
 
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
-def _get_governor_building_bonus(db: Session, city_id: int) -> dict:
-    governor = (
-        db.query(Hero)
-        .filter(
-            Hero.city_id == int(city_id),
-            Hero.status == "governor",
-        )
-        .first()
-    )
+def _get_city_building_bonus(db: Session, city_id: int) -> dict:
+    governor, bonuses = get_city_governor_bonus(db, int(city_id))
 
-    bonus = (
-        int(getattr(governor, "governor_building_speed_bonus", 0) or 0)
-        if governor
-        else 0
-    )
+    bonus = int(bonuses.get("building_speed_bonus", 0) * 100)
     bonus = max(0, min(bonus, 90))
 
     return {"governor": governor, "bonus": bonus}
@@ -208,7 +197,7 @@ def preview_upgrade(
 	"governor_bonus": {
     	"hero_id": gov["governor"].id if gov["governor"] else None,
     	"name": gov["governor"].name if gov["governor"] else None,
-    	"governor_building_speed_bonus": int(gov["bonus"]),
+    	"building_speed_bonus": int(gov["bonus"]),
 	},
         "have_resources": len(insufficient) == 0,
         "insufficient": insufficient,
@@ -464,7 +453,7 @@ def start_upgrade(
     city.iron -= cost["iron"]
 
     started = datetime.utcnow()
-    base_seconds = upgrade_time_seconds(building_type, to_level)
+    base_seconds = upgrade_time_seconds(b.type, to_level)
     gov = _get_governor_building_bonus(db, int(city.id))
     seconds = _apply_speed_bonus(base_seconds, int(gov["bonus"]))
     completes_at = datetime.utcnow() + timedelta(seconds=seconds)
@@ -475,7 +464,7 @@ def start_upgrade(
         from_level=b.level,
         to_level=to_level,
         started_at=started,
-        completes_at=completes,
+        completes_at=completes_at,
     )
 
     db.add(up)
@@ -502,7 +491,7 @@ def start_upgrade(
 	"governor_bonus": {
     	"hero_id": gov["governor"].id if gov["governor"] else None,
     	"name": gov["governor"].name if gov["governor"] else None,
-    	"governor_building_speed_bonus": int(gov["bonus"]),
+    	"building_speed_bonus": int(gov["bonus"]),
 	},
-        "completes_at": completes.isoformat(),
+        "completes_at": completes_at.isoformat(),
     }

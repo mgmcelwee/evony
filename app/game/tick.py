@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import update
 
 from app.game.raid_mail import send_raid_result_mail
+from app.game.governor import get_city_governor_bonus
 from app.models.building import Building
 from app.models.city import City
 from app.models.raid import Raid
@@ -296,6 +297,19 @@ def _apply_casualties_at_arrival(db: Session, raid: Raid) -> None:
     db.flush()  # allocate snapshot IDs (not required, but fine)
 
     # Compute total power
+    attacker_governor, attacker_bonuses = get_city_governor_bonus(
+        db,
+        int(raid.attacker_city_id),
+    )
+
+    defender_governor, defender_bonuses = get_city_governor_bonus(
+        db,
+        int(raid.target_city_id),
+    )
+
+    attack_bonus = float(attacker_bonuses.get("attack_bonus", 0) or 0)
+    defense_bonus = float(defender_bonuses.get("defense_bonus", 0) or 0)
+
     atk_power = 0.0
     def_power = 0.0
 
@@ -310,7 +324,8 @@ def _apply_casualties_at_arrival(db: Session, raid: Raid) -> None:
         if sent <= 0:
             continue
 
-        atk_power += sent * (float(tt.attack) + 0.10 * float(tt.hp))
+    unit_power = float(tt.attack) + 0.10 * float(tt.hp)
+    atk_power += sent * unit_power * (1.0 + attack_bonus)
 
     # Defender power: sum all defender troops * (defense + 0.10*hp)
     for ct in def_rows:
@@ -323,7 +338,8 @@ def _apply_casualties_at_arrival(db: Session, raid: Raid) -> None:
         if dcnt <= 0:
             continue
 
-        def_power += dcnt * (float(tt.defense) + 0.10 * float(tt.hp))
+    unit_power = float(tt.defense) + 0.10 * float(tt.hp)
+    def_power += dcnt * unit_power * (1.0 + defense_bonus)
 
     # If no defenders, no losses
     if def_power <= 0:
@@ -654,19 +670,6 @@ def _next_event_time(db: Session, after: datetime, hard_stop: datetime) -> Optio
         return None
 
     return min(next_times)
-
-    next_research = (
-        db.query(ResearchQueue)
-        .filter(
-            ResearchQueue.status == "researching",
-            ResearchQueue.finishes_at > after,
-            ResearchQueue.finishes_at <= hard_stop,
-        )
-        .order_by(ResearchQueue.finishes_at.asc())
-        .first()
-    )
-    if next_research:
-        next_times.append(next_research.finishes_at)
 
 def finalize_training_queue(db: Session, now: datetime) -> int:
     # grab candidate IDs first (cheap, deterministic ordering)

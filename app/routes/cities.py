@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field
 from app.config import ADMIN_KEY
 from app.database import get_db
 from app.models.city import City
-from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.tick_util import tick_world_now
 from app.models.city_troop import CityTroop
 from app.models.troop_type import TroopType
 from app.models.building import Building
 from app.models.training_queue import TrainingQueue
+from app.game.governor import get_city_governor_bonus
 from app.game.tick import _recalc_storage_for_city
 
 router = APIRouter(prefix="/cities", tags=["cities"])
@@ -62,7 +62,7 @@ class RatesBlock(BaseModel):
 class GovernorBonusBlock(BaseModel):
     hero_id: int | None = None
     name: str | None = None
-    governor_production_bonus: int = 0
+    production_bonus: int = 0
 
 class CityResponse(BaseModel):
     city_id: int
@@ -145,22 +145,10 @@ class CityTroopsResponse(BaseModel):
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(ADMIN_KEY) and bool(x_admin_key) and secrets.compare_digest(x_admin_key, ADMIN_KEY)
 
-def _get_governor_production_bonus(db: Session, city_id: int) -> dict:
-    governor = (
-        db.query(Hero)
-        .filter(
-            Hero.city_id == int(city_id),
-            Hero.status == "governor",
-        )
-        .first()
-    )
+def _get_city_production_bonus(db: Session, city_id: int) -> dict:
+    governor, bonuses = get_city_governor_bonus(db, int(city_id))
 
-    bonus = (
-        int(getattr(governor, "governor_production_bonus", 0) or 0)
-        if governor
-        else 0
-    )
-
+    bonus = int(bonuses.get("production_bonus", 0) * 100)
     bonus = max(0, min(bonus, 90))
 
     return {
@@ -232,7 +220,7 @@ def get_city(
 	"governor_bonus": {
     	"hero_id": gov["governor"].id if gov["governor"] else None,
     	"name": gov["governor"].name if gov["governor"] else None,
-    	"governor_production_bonus": production_bonus,
+    	"production_bonus": production_bonus,
 	},
         "last_tick_at": city.last_tick_at.isoformat() if city.last_tick_at else None,
     }
