@@ -45,6 +45,21 @@ class HeroSetRequest(BaseModel):
     research_speed_bonus: int = Field(default=0, ge=0)
     status: str = Field(default="idle")
 
+class HeroUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=50)
+    level: int | None = Field(default=None, ge=1, le=100)
+    xp: int | None = Field(default=None, ge=0)
+    attack_bonus: int | None = Field(default=None, ge=0)
+    defense_bonus: int | None = Field(default=None, ge=0)
+    march_speed_bonus: int | None = Field(default=None, ge=0)
+    training_speed_bonus: int | None = Field(default=None, ge=0)
+    research_speed_bonus: int | None = Field(default=None, ge=0)
+    status: str | None = Field(default=None)
+
+
+class HeroRenameRequest(BaseModel):
+    name: str = Field(default="Roland", min_length=2, max_length=50)
+
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(x_admin_key and x_admin_key == ADMIN_KEY)
 
@@ -52,6 +67,23 @@ def require_admin_key(x_admin_key: str | None = Header(default=None, alias="X-Ad
     if not x_admin_key or x_admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Admin key required")
     return True
+
+def _hero_to_dict(hero: Hero) -> dict:
+    return {
+        "id": int(hero.id),
+        "city_id": int(hero.city_id),
+        "name": hero.name,
+        "level": int(hero.level),
+        "xp": int(hero.xp),
+        "status": hero.status,
+        "bonuses": {
+            "attack": int(hero.attack_bonus),
+            "defense": int(hero.defense_bonus),
+            "march_speed": int(hero.march_speed_bonus),
+            "training_speed": int(hero.training_speed_bonus),
+            "research_speed": int(hero.research_speed_bonus),
+        },
+    }
 
 @router.post("/cities/{city_id}/research/set")
 def admin_set_research_level(
@@ -337,4 +369,94 @@ def admin_set_hero(
                 "research_speed": hero.research_speed_bonus,
             },
         },
+    }
+@router.get("/heroes/{hero_id}")
+def admin_get_hero(
+    hero_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    if not _is_admin(x_admin_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    hero = db.query(Hero).filter(Hero.id == hero_id).first()
+    if not hero:
+        raise HTTPException(status_code=404, detail="Hero not found")
+
+    return {"ok": True, "hero": _hero_to_dict(hero)}
+
+
+@router.post("/heroes/{hero_id}/set")
+def admin_update_hero(
+    hero_id: int,
+    payload: HeroUpdateRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    if not _is_admin(x_admin_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    hero = db.query(Hero).filter(Hero.id == hero_id).first()
+    if not hero:
+        raise HTTPException(status_code=404, detail="Hero not found")
+
+    data = payload.model_dump(exclude_unset=True)
+
+    for field, value in data.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(hero, field, value)
+
+    db.commit()
+    db.refresh(hero)
+
+    return {"ok": True, "hero": _hero_to_dict(hero)}
+
+
+@router.post("/heroes/{hero_id}/rename")
+def admin_rename_hero(
+    hero_id: int,
+    payload: HeroRenameRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    if not _is_admin(x_admin_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    hero = db.query(Hero).filter(Hero.id == hero_id).first()
+    if not hero:
+        raise HTTPException(status_code=404, detail="Hero not found")
+
+    hero.name = payload.name.strip()
+    db.commit()
+    db.refresh(hero)
+
+    return {"ok": True, "hero": _hero_to_dict(hero)}
+
+
+@router.delete("/heroes/{hero_id}")
+def admin_delete_hero(
+    hero_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    if not _is_admin(x_admin_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    hero = db.query(Hero).filter(Hero.id == hero_id).first()
+    if not hero:
+        raise HTTPException(status_code=404, detail="Hero not found")
+
+    deleted = _hero_to_dict(hero)
+
+    db.delete(hero)
+    db.commit()
+
+    return {
+        "ok": True,
+        "deleted": deleted,
     }
