@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Evony-like UI</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background:#0b0f16; color:#e6edf3; }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+      .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+      .card { background:#121a26; border:1px solid #243044; border-radius:12px; padding:12px; }
+      .card h2 { margin: 0 0 10px; font-size: 16px; color:#cbd5e1; }
+      label { display:block; font-size: 12px; color:#94a3b8; margin-bottom: 4px; }
+      input, select, button { padding:10px; border-radius:10px; border:1px solid #2b3a55; background:#0e1624; color:#e6edf3; }
+      input { width: 220px; }
+      button { cursor:pointer; }
+      button.primary { background:#1f6feb; border-color:#1f6feb; }
+      button.danger { background:#b91c1c; border-color:#b91c1c; }
+      button.ghost { background:transparent; }
+      .small { font-size: 12px; color:#94a3b8; }
+      .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+      @media (max-width: 900px){ .grid { grid-template-columns:1fr; } }
+      table { width:100%; border-collapse: collapse; }
+      th, td { padding:8px; border-bottom:1px solid #1f2a3d; font-size: 13px; text-align:left; }
+      th { color:#9fb3c8; font-weight:600; }
+      .pill { display:inline-block; padding:2px 8px; border-radius: 999px; font-size:12px; border:1px solid #2b3a55; }
+      .pill.training { border-color:#f59e0b; color:#fbbf24; }
+      .pill.completed { border-color:#22c55e; color:#4ade80; }
+      .pill.cancelled { border-color:#ef4444; color:#f87171; }
+      .pill.processing { border-color:#60a5fa; color:#93c5fd; }
+      pre { background:#0e1624; border:1px solid #243044; padding:10px; border-radius:12px; overflow:auto; }
+      .right { margin-left:auto; }
+      .statusbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+      a { color:#60a5fa; text-decoration:none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="row">
+        <div class="card" style="flex:1;">
+          <h2>Evony-like UI</h2>
+          <div class="statusbar">
+            <div class="small">API: <span id="apiStatus">checking…</span></div>
+            <div class="small">Token: <span id="tokenStatus">none</span></div>
+            <div class="small">Auto-refresh: <span id="refreshStatus">off</span></div>
+            <div class="right small"><a href="/docs" target="_blank">OpenAPI docs</a></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px;">
+        <div class="card">
+          <h2>Login</h2>
+          <div class="row">
+            <div>
+              <label>Username</label>
+              <input id="username" value="alicia" />
+            </div>
+            <div>
+              <label>Password</label>
+              <input id="password" type="password" value="ChangeMe123!" />
+            </div>
+            <button class="primary" id="btnLogin">Login</button>
+            <button class="ghost" id="btnLogout">Logout</button>
+          </div>
+          <div class="small" style="margin-top:8px;">Token is stored in <code>localStorage</code> on this browser.</div>
+        </div>
+
+        <div class="card">
+          <h2>City</h2>
+          <div class="row">
+            <div>
+              <label>City ID</label>
+              <input id="cityId" value="3" />
+            </div>
+            <button class="primary" id="btnRefresh">Refresh now</button>
+            <button id="btnToggleAuto">Start auto-refresh</button>
+          </div>
+        </div>
+
+        <div class="card" style="flex:1;">
+          <h2>Train (Queue)</h2>
+          <div class="row">
+            <div>
+              <label>Troop code</label>
+              <input id="trainCode" value="t1_inf" />
+            </div>
+            <div>
+              <label>Count</label>
+              <input id="trainCount" type="number" value="5" min="1" />
+            </div>
+            <button class="primary" id="btnEnqueue">Enqueue</button>
+          </div>
+          <div class="small" style="margin-top:8px;">Uses <code>POST /cities/{city_id}/train/queue</code>.</div>
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top:12px;">
+        <div class="card">
+          <h2>City Resources</h2>
+          <div id="resources"></div>
+          <div class="small" id="cityMeta"></div>
+        </div>
+
+        <div class="card">
+          <h2>Troops</h2>
+          <div id="troops"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px;">
+        <h2>Training Queue</h2>
+        <div class="small" style="margin-bottom:10px;">
+          Shows newest-first (your API pagination style). Cancel buttons appear only for <span class="pill training">training</span>.
+        </div>
+        <div id="queue"></div>
+      </div>
+
+      <div class="card" style="margin-top:12px;">
+        <h2>Last response / error</h2>
+        <pre id="log">(nothing yet)</pre>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+

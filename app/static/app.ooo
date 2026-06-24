@@ -1,0 +1,256 @@
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  token: localStorage.getItem("evony_token") || "",
+  autoTimer: null,
+};
+
+function log(obj) {
+  $("log").textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+}
+
+function setToken(token) {
+  state.token = token || "";
+  if (state.token) localStorage.setItem("evony_token", state.token);
+  else localStorage.removeItem("evony_token");
+  $("tokenStatus").textContent = state.token ? "set" : "none";
+}
+
+async function api(path, { method = "GET", body = null, auth = true } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (auth && state.token) headers["Authorization"] = `Bearer ${state.token}`;
+
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : null,
+  });
+
+  const text = await res.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+
+  if (!res.ok) {
+    const err = { status: res.status, path, error: data };
+    throw err;
+  }
+  return data;
+}
+
+function fmtIso(iso) {
+  if (!iso) return "";
+  // simple display; server uses UTC; keep it readable
+  return iso.replace("T", " ").replace("Z", " UTC");
+}
+
+function pill(status) {
+  const cls = ["pill", status].join(" ");
+  return `<span class="${cls}">${status}</span>`;
+}
+
+async function checkHealth() {
+  try {
+    const r = await api("/health", { auth: false });
+    $("apiStatus").textContent = r?.status === "ok" ? "ok" : "unknown";
+  } catch (e) {
+    $("apiStatus").textContent = "down";
+  }
+}
+
+async function doLogin() {
+  const username = $("username").value.trim();
+  const password = $("password").value;
+
+  const data = await api("/auth/login", {
+    method: "POST",
+    auth: false,
+    body: { username, password },
+  });
+
+  if (!data?.token) throw { status: 0, error: "No token returned" };
+  setToken(data.token);
+  log({ ok: true, logged_in_as: username });
+}
+
+function doLogout() {
+  stopAuto();
+  setToken("");
+  log("Logged out (token cleared).");
+}
+
+function getCityId() {
+  const v = parseInt($("cityId").value, 10);
+  if (!Number.isFinite(v) || v <= 0) throw { status: 0, error: "Invalid city id" };
+  return v;
+}
+
+async function refreshAll() {
+  const cityId = getCityId();
+
+  // These reads will tick world (per your API design) — great for queue completion.
+  const [city, troops, queue] = await Promise.all([
+    api(`/cities/${cityId}`),
+    api(`/cities/${cityId}/troops`),
+    api(`/cities/${cityId}/train/queue?limit=50`),
+  ]);
+
+  renderCity(city);
+  renderTroops(troops);
+  renderQueue(queue, cityId);
+}
+
+function renderCity(city) {
+  // Your /cities/{id} returns resources nested under "resources"
+  const r = city?.resources || {};
+  const caps = city?.caps || {};
+  const rates = city?.rates_per_min || {};
+  const prot = city?.protected || {};
+
+  $("resources").innerHTML = `
+    <table>
+      <thead><tr><th>Resource</th><th>Now</th><th>Cap</th><th>Protected</th><th>Rate/min</th></tr></thead>
+      <tbody>
+        <tr><td>Food</td><td>${r.food ?? "-"}</td><td>${caps.max_food ?? "-"}</td><td>${prot.food ?? "-"}</td><td>${rates.food_rate ?? "-"}</td></tr>
+        <tr><td>Wood</td><td>${r.wood ?? "-"}</td><td>${caps.max_wood ?? "-"}</td><td>${prot.wood ?? "-"}</td><td>${rates.wood_rate ?? "-"}</td></tr>
+        <tr><td>Stone</td><td>${r.stone ?? "-"}</td><td>${caps.max_stone ?? "-"}</td><td>${prot.stone ?? "-"}</td><td>${rates.stone_rate ?? "-"}</td></tr>
+        <tr><td>Iron</td><td>${r.iron ?? "-"}</td><td>${caps.max_iron ?? "-"}</td><td>${prot.iron ?? "-"}</td><td>${rates.iron_rate ?? "-"}</td></tr>
+      </tbody>
+    </table>
+  `;
+
+  $("cityMeta").textContent =
+    `City ${city.city_id} — ${city.name} | Townhall L${city.townhall_level} | last_tick_at=${city.last_tick_at || "n/a"}`;
+}
+
+function renderTroops(troopsResp) {
+  const troops = troopsResp?.troops || [];
+  const totals = troopsResp?.totals || {};
+
+  if (!troops.length) {
+    $("troops").innerHTML = `<div class="small">No troops yet.</div>`;
+    return;
+  }
+
+  const rows = troops
+    .map(t => `<tr><td>${t.code}</td><td>${t.name}</td><td>${t.tier}</td><td>${t.count}</td></tr>`)
+    .join("");
+
+  $("troops").innerHTML = `
+    <div class="small" style="margin-bottom:8px;">Units: ${totals.units ?? "-"} | Carry: ${totals.carry ?? "-"}</div>
+    <table>
+      <thead><tr><th>Code</th><th>Name</th><th>Tier</th><th>Count</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderQueue(queueResp, cityId) {
+  const items = queueResp?.queue || [];
+  if (!items.length) {
+    $("queue").innerHTML = `<div class="small">Queue empty.</div>`;
+    return;
+  }
+
+  const rows = items.map(q => {
+    const canCancel = q.status === "training";
+    const cancelBtn = canCancel
+      ? `<button class="danger" data-cancel="${q.id}">Cancel</button>`
+      : `<button disabled class="ghost">—</button>`;
+
+    const cost = q.cost || {};
+    const costStr = `F${cost.food||0} W${cost.wood||0} S${cost.stone||0} I${cost.iron||0}`;
+
+    return `
+      <tr>
+        <td>#${q.id}</td>
+        <td>${q.code}</td>
+        <td>${q.count}</td>
+        <td>${pill(q.status)}</td>
+        <td>${fmtIso(q.started_at)}</td>
+        <td>${fmtIso(q.finishes_at)}</td>
+        <td>${q.seconds_total}</td>
+        <td>${costStr}</td>
+        <td>${cancelBtn}</td>
+      </tr>
+    `;
+  }).join("");
+
+  $("queue").innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>Troop</th><th>Count</th><th>Status</th>
+          <th>Started</th><th>Finishes</th><th>Secs</th><th>Cost</th><th>Action</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  // attach cancel handlers
+  $("queue").querySelectorAll("button[data-cancel]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const qid = btn.getAttribute("data-cancel");
+      try {
+        const data = await api(`/cities/${cityId}/train/queue/${qid}/cancel`, { method: "POST" });
+        log(data);
+        await refreshAll();
+      } catch (e) {
+        log(e);
+      }
+    });
+  });
+}
+
+async function enqueue() {
+  const cityId = getCityId();
+  const code = $("trainCode").value.trim();
+  const count = parseInt($("trainCount").value, 10);
+
+  if (!code) throw { status: 0, error: "Troop code required" };
+  if (!Number.isFinite(count) || count <= 0) throw { status: 0, error: "Count must be > 0" };
+
+  const body = { troops: [{ code, count }] };
+  const data = await api(`/cities/${cityId}/train/queue`, { method: "POST", body });
+  log(data);
+  await refreshAll();
+}
+
+function startAuto() {
+  if (state.autoTimer) return;
+  $("refreshStatus").textContent = "on (2s)";
+  $("btnToggleAuto").textContent = "Stop auto-refresh";
+  state.autoTimer = setInterval(() => {
+    refreshAll().catch(log);
+  }, 2000);
+}
+
+function stopAuto() {
+  if (!state.autoTimer) return;
+  clearInterval(state.autoTimer);
+  state.autoTimer = null;
+  $("refreshStatus").textContent = "off";
+  $("btnToggleAuto").textContent = "Start auto-refresh";
+}
+
+function toggleAuto() {
+  if (state.autoTimer) stopAuto();
+  else startAuto();
+}
+
+async function init() {
+  await checkHealth();
+  setToken(state.token);
+
+  $("btnLogin").addEventListener("click", () => doLogin().catch(log));
+  $("btnLogout").addEventListener("click", doLogout);
+  $("btnRefresh").addEventListener("click", () => refreshAll().catch(log));
+  $("btnToggleAuto").addEventListener("click", toggleAuto);
+  $("btnEnqueue").addEventListener("click", () => enqueue().catch(log));
+
+  // initial data load if token exists
+  if (state.token) refreshAll().catch(log);
+}
+
+init().catch(log);
+

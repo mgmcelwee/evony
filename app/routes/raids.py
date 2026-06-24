@@ -436,22 +436,20 @@ def _round2(x: float) -> float:
     return round(float(x), 2)
 
 class TroopSendItem(BaseModel):
-    # Use code so your API is stable across DB IDs
-    code: str = Field(..., min_length=1, max_length=32)
-    count: int = Field(..., ge=1)
+    code: str = Field(default="t1_inf", min_length=1, max_length=32)
+    count: int = Field(default=10, ge=1)
+
 
 class RaidCreateRequest(BaseModel):
-    attacker_city_id: int
-    target_city_id: int
+    attacker_city_id: int = Field(default=1, ge=1)
+    target_city_id: int = Field(default=2, ge=1)
 
-    # Optional: for admin/testing only. Normal players should omit.
-    carry_capacity: Optional[int] = Field(None, ge=1, le=10_000_000)
+    carry_capacity: Optional[int] = Field(default=None, ge=1, le=10_000_000)
+    travel_seconds: Optional[int] = Field(default=None, ge=1, le=60 * 60 * 24)
 
-    # Optional override for testing. If omitted, computed from distance.
-    travel_seconds: Optional[int] = Field(None, ge=1, le=60 * 60 * 24)
-
-    # Option B: real army composition (optional for backward compatibility)
-    troops: Optional[List[TroopSendItem]] = None
+    troops: Optional[List[TroopSendItem]] = Field(
+        default_factory=lambda: [TroopSendItem()]
+    )
 
 @router.get("/preview")
 def preview_raid(

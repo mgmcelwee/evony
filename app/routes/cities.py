@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import os
 import secrets
-from datetime import datetime
+import math
+from datetime import datetime, timedelta
 from typing import Optional, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Body
+from fastapi import APIRouter, Depends, Header, HTTPException, Body, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import update
+from pydantic import BaseModel, Field
 
 from app.config import ADMIN_KEY
 from app.database import get_db
@@ -16,16 +19,127 @@ from app.routes.auth import get_current_user
 from app.routes.tick_util import tick_world_now
 from app.models.city_troop import CityTroop
 from app.models.troop_type import TroopType
-
+from app.models.building import Building
+from app.models.training_queue import TrainingQueue
+from app.game.tick import _recalc_storage_for_city
 
 router = APIRouter(prefix="/cities", tags=["cities"])
 
+class TroopLine(BaseModel):
+    code: str = Field(default="t1_inf")
+    count: int = Field(default=10)
 
+
+class TroopsSetRequest(BaseModel):
+    troops: list[TroopLine] = Field(
+        default_factory=lambda: [TroopLine()]
+    )
+
+class ResearchRequest(BaseModel):
+    research_key: str = Field(default="agriculture")
+
+class TroopsSetPayload(BaseModel):
+    troops: list[TroopLine] = Field(
+        default_factory=lambda: [TroopLine()]
+    )
+
+TroopsSetPayload.model_rebuild()
+
+class ResourceBlock(BaseModel):
+    food: int = 0
+    wood: int = 0
+    stone: int = 0
+    iron: int = 0
+
+
+class RatesBlock(BaseModel):
+    food_rate: int = 0
+    wood_rate: int = 0
+    stone_rate: int = 0
+    iron_rate: int = 0
+
+
+class CityResponse(BaseModel):
+    city_id: int
+    name: str
+    townhall_level: int
+    resources: ResourceBlock
+    rates_per_min: RatesBlock
+    caps: ResourceBlock
+    protected: ResourceBlock
+    lootable: ResourceBlock
+    last_tick_at: str | None = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "city_id": 1,
+                "name": "EvoCapital",
+                "townhall_level": 1,
+                "resources": {
+                    "food": 0,
+                    "wood": 0,
+                    "stone": 0,
+                    "iron": 0
+                },
+                "rates_per_min": {
+                    "food_rate": 40,
+                    "wood_rate": 30,
+                    "stone_rate": 17,
+                    "iron_rate": 9
+                },
+                "caps": {
+                    "food": 1000,
+                    "wood": 1000,
+                    "stone": 1000,
+                    "iron": 1000
+                },
+                "protected": {
+                    "food": 0,
+                    "wood": 0,
+                    "stone": 0,
+                    "iron": 0
+                },
+                "lootable": {
+                    "food": 0,
+                    "wood": 0,
+                    "stone": 0,
+                    "iron": 0
+                },
+                "last_tick_at": None
+            }
+        }
+    }
+
+class TroopView(BaseModel):
+    troop_type_id: int = 1
+    code: str = "t1_inf"
+    name: str = "T1 Infantry"
+    tier: int = 1
+    count: int = 5
+    speed: int = 100
+    carry: int = 5
+    attack: int = 10
+    defense: int = 12
+    hp: int = 120
+
+
+class TroopTotals(BaseModel):
+    units: int = 5
+    carry: int = 25
+
+
+class CityTroopsResponse(BaseModel):
+    city_id: int = 1
+    name: str = "EvoCapital"
+    troops: list[TroopView] = Field(default_factory=lambda: [TroopView()])
+    totals: TroopTotals = TroopTotals()
+    at: str | None = None
 
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(ADMIN_KEY) and bool(x_admin_key) and secrets.compare_digest(x_admin_key, ADMIN_KEY)
 
-@router.get("/{city_id}")
+@router.get("/{city_id}", response_model=CityResponse)
 def get_city(
     city_id: int,
     db: Session = Depends(get_db),
@@ -80,7 +194,7 @@ def get_city(
         "last_tick_at": city.last_tick_at.isoformat() if city.last_tick_at else None,
     }
 
-@router.get("/{city_id}/troops")
+@router.get("/{city_id}/troops", response_model=CityTroopsResponse)
 def get_city_troops(
     city_id: int,
     db: Session = Depends(get_db),
@@ -142,271 +256,3 @@ def get_city_troops(
         "at": datetime.utcnow().isoformat(),
     }
 
-@router.post("/{city_id}/troops/set")
-def admin_set_city_troops(
-    city_id: int,
-    payload: dict = Body(...),
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
-) -> dict:
-    if not _is_admin(x_admin_key):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    troops = payload.get("troops") or []
-    if not isinstance(troops, list) or not troops:
-        raise HTTPException(status_code=400, detail="troops list required")
-
-    city = db.query(City).filter(City.id == city_id).first()
-    if not city:
-        raise HTTPException(status_code=404, detail="City not found")
-
-    codes = [str(t.get("code", "")).strip() for t in troops]
-    types = db.query(TroopType).filter(TroopType.code.in_(codes)).all()
-    by_code = {tt.code: tt for tt in types}
-
-    updated = []
-    for t in troops:
-        code = str(t.get("code", "")).strip()
-        cnt = int(t.get("count", 0) or 0)
-        if code not in by_code:
-            raise HTTPException(status_code=400, detail={"error": "Unknown troop code", "code": code})
-
-        tt = by_code[code]
-        row = (
-            db.query(CityTroop)
-            .filter(CityTroop.city_id == city_id, CityTroop.troop_type_id == tt.id)
-            .first()
-        )
-        if not row:
-            row = CityTroop(city_id=city_id, troop_type_id=tt.id, count=0)
-            db.add(row)
-            db.flush()
-
-        row.count = max(0, cnt)
-        updated.append({"code": code, "count": row.count})
-
-    db.commit()
-    return {"ok": True, "city_id": city_id, "updated": updated}
-
-# --- Training (v1: instant) ------------------------------------
-def _get_city_or_404(
-    db: Session,
-    city_id: int,
-    current_user,
-    x_admin_key: str | None,
-) -> City:
-    q = db.query(City).filter(City.id == int(city_id))
-    if not _is_admin(x_admin_key):
-        q = q.filter(City.owner_id == current_user.id)
-    city = q.first()
-    if not city:
-        raise HTTPException(status_code=404, detail="City not found")
-    return city
-
-
-def _compute_training_cost(tt: TroopType, count: int) -> dict:
-    """
-    Simple v1 costs. Tweak freely.
-    Uses tier to scale so T1 is cheap.
-    """
-    tier = int(getattr(tt, "tier", 1) or 1)
-    count = max(0, int(count))
-
-    # Per-unit costs by tier (v1)
-    # T1: 1 food, 1 wood
-    # T2: 2 food, 2 wood, 1 stone
-    # T3+: add iron too
-    food_u = 1 * tier
-    wood_u = 1 * tier
-    stone_u = 0 if tier <= 1 else (tier - 1)
-    iron_u = 0 if tier <= 2 else (tier - 2)
-
-    return {
-        "food": int(food_u * count),
-        "wood": int(wood_u * count),
-        "stone": int(stone_u * count),
-        "iron": int(iron_u * count),
-    }
-
-
-def _sum_cost(costs: list[dict]) -> dict:
-    out = {"food": 0, "wood": 0, "stone": 0, "iron": 0}
-    for c in costs:
-        for k in out.keys():
-            out[k] += int(c.get(k, 0) or 0)
-    return out
-
-
-def _check_affordable(city: City, cost: dict) -> dict:
-    have = {
-        "food": int(getattr(city, "food", 0) or 0),
-        "wood": int(getattr(city, "wood", 0) or 0),
-        "stone": int(getattr(city, "stone", 0) or 0),
-        "iron": int(getattr(city, "iron", 0) or 0),
-    }
-    missing = {}
-    for k, v in cost.items():
-        if have[k] < int(v):
-            missing[k] = int(v) - have[k]
-    return {"ok": (len(missing) == 0), "have": have, "missing": missing}
-
-
-@router.post("/{city_id}/train/preview")
-def train_preview(
-    city_id: int,
-    payload: dict = Body(...),
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
-) -> dict:
-    tick_world_now(db)
-
-    city = _get_city_or_404(db, city_id, current_user, x_admin_key)
-
-    troops = payload.get("troops") or []
-    if not isinstance(troops, list) or not troops:
-        raise HTTPException(status_code=400, detail="troops list required")
-
-    # normalize + aggregate by code
-    want_by_code: dict[str, int] = {}
-    for t in troops:
-        code = str(t.get("code", "")).strip()
-        cnt = int(t.get("count", 0) or 0)
-        if not code or cnt <= 0:
-            raise HTTPException(status_code=400, detail="Invalid troop line")
-        want_by_code[code] = want_by_code.get(code, 0) + cnt
-
-    types = db.query(TroopType).filter(TroopType.code.in_(list(want_by_code.keys()))).all()
-    by_code = {tt.code: tt for tt in types}
-
-    missing_codes = [c for c in want_by_code.keys() if c not in by_code]
-    if missing_codes:
-        raise HTTPException(status_code=400, detail={"error": "Unknown troop code(s)", "codes": missing_codes})
-
-    breakdown = []
-    costs = []
-    for code, cnt in want_by_code.items():
-        tt = by_code[code]
-        cost = _compute_training_cost(tt, cnt)
-        costs.append(cost)
-        breakdown.append(
-            {
-                "code": code,
-                "name": tt.name,
-                "tier": int(getattr(tt, "tier", 0) or 0),
-                "count": int(cnt),
-                "cost": cost,
-            }
-        )
-
-    total_cost = _sum_cost(costs)
-    afford = _check_affordable(city, total_cost)
-
-    return {
-        "ok": True,
-        "city_id": int(city.id),
-        "troops": breakdown,
-        "total_cost": total_cost,
-        "affordable": bool(afford["ok"]),
-        "have": afford["have"],
-        "missing": afford["missing"],
-    }
-
-
-@router.post("/{city_id}/train")
-def train_troops(
-    city_id: int,
-    payload: dict = Body(...),
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
-) -> dict:
-    tick_world_now(db)
-
-    city = _get_city_or_404(db, city_id, current_user, x_admin_key)
-
-    troops = payload.get("troops") or []
-    if not isinstance(troops, list) or not troops:
-        raise HTTPException(status_code=400, detail="troops list required")
-
-    # normalize + aggregate by code
-    want_by_code: dict[str, int] = {}
-    for t in troops:
-        code = str(t.get("code", "")).strip()
-        cnt = int(t.get("count", 0) or 0)
-        if not code or cnt <= 0:
-            raise HTTPException(status_code=400, detail="Invalid troop line")
-        want_by_code[code] = want_by_code.get(code, 0) + cnt
-
-    types = db.query(TroopType).filter(TroopType.code.in_(list(want_by_code.keys()))).all()
-    by_code = {tt.code: tt for tt in types}
-
-    missing_codes = [c for c in want_by_code.keys() if c not in by_code]
-    if missing_codes:
-        raise HTTPException(status_code=400, detail={"error": "Unknown troop code(s)", "codes": missing_codes})
-
-    # compute total cost
-    breakdown = []
-    costs = []
-    for code, cnt in want_by_code.items():
-        tt = by_code[code]
-        cost = _compute_training_cost(tt, cnt)
-        costs.append(cost)
-        breakdown.append(
-            {
-                "code": code,
-                "name": tt.name,
-                "tier": int(getattr(tt, "tier", 0) or 0),
-                "count": int(cnt),
-                "cost": cost,
-            }
-        )
-
-    total_cost = _sum_cost(costs)
-    afford = _check_affordable(city, total_cost)
-    if not afford["ok"]:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "Insufficient resources", "cost": total_cost, "missing": afford["missing"]},
-        )
-
-    # subtract resources
-    city.food = int(getattr(city, "food", 0) or 0) - int(total_cost["food"])
-    city.wood = int(getattr(city, "wood", 0) or 0) - int(total_cost["wood"])
-    city.stone = int(getattr(city, "stone", 0) or 0) - int(total_cost["stone"])
-    city.iron = int(getattr(city, "iron", 0) or 0) - int(total_cost["iron"])
-
-    # apply troop increases
-    updated = []
-    for code, cnt in want_by_code.items():
-        tt = by_code[code]
-        row = (
-            db.query(CityTroop)
-            .filter(CityTroop.city_id == int(city.id), CityTroop.troop_type_id == int(tt.id))
-            .first()
-        )
-        before = int(getattr(row, "count", 0) or 0) if row else 0
-        if not row:
-            row = CityTroop(city_id=int(city.id), troop_type_id=int(tt.id), count=0)
-            db.add(row)
-            db.flush()
-        row.count = int(before) + int(cnt)
-        updated.append({"code": code, "before": int(before), "after": int(row.count), "added": int(cnt)})
-
-    db.commit()
-    db.refresh(city)
-
-    return {
-        "ok": True,
-        "city_id": int(city.id),
-        "trained": breakdown,
-        "total_cost": total_cost,
-        "resources_after": {
-            "food": int(city.food),
-            "wood": int(city.wood),
-            "stone": int(city.stone),
-            "iron": int(city.iron),
-        },
-        "updated": updated,
-    }

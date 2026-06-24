@@ -1,0 +1,457 @@
+# app/routes/research.py
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.constants import MAX_LEVEL
+from app.database import get_db
+from app.models.building import Building
+from app.models.city import City
+from app.models.research import Research
+from app.models.research_queue import ResearchQueue
+from app.routes.auth import get_current_user
+from app.routes.buildings import _get_city_or_404
+
+router = APIRouter(tags=["research"])
+
+class ResearchStartRequest(BaseModel):
+    research_key: str = Field(default="agriculture", min_length=2, max_length=32)
+
+class ResearchSetRequest(BaseModel):
+    research_key: str = Field(default="agriculture", min_length=2, max_length=32)
+    level: int = Field(default=5, ge=0, le=MAX_LEVEL)
+
+@router.get("/{city_id}/research")
+def list_research(
+    city_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    _get_city_or_404(db, city_id, current_user, x_admin_key)
+
+    rows = db.query(Research).filter(Research.city_id == city_id).all()
+    levels = {r.research_key: r.level for r in rows}
+
+    active = (
+        db.query(ResearchQueue)
+        .filter(
+            ResearchQueue.city_id == city_id,
+            ResearchQueue.status == "researching",
+        )
+        .first()
+    )
+
+    return {
+        "city_id": city_id,
+        "research": [
+            {
+                "key": key,
+                "name": defn.display_name,
+                "level": levels.get(key, 0),
+            }
+            for key, defn in RESEARCH.items()
+        ],
+        "active_research": (
+            {
+                "research_key": active.research_key,
+                "from_level": active.from_level,
+                "to_level": active.to_level,
+                "started_at": active.started_at.isoformat(),
+                "finishes_at": active.finishes_at.isoformat(),
+            }
+            if active
+            else None
+        ),
+    }
+
+@router.post("/{city_id}/research/preview")
+def preview_research(
+    city_id: int,
+    payload: ResearchStartRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    city = _get_city_or_404(db, city_id, current_user, x_admin_key)
+
+    key = payload.research_key.strip().lower()
+
+    if key not in RESEARCH:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Research not found",
+                "requested": payload.research_key,
+                "available": sorted(RESEARCH.keys()),
+            },
+        )
+
+    current = (
+        db.query(Research)
+        .filter(
+            Research.city_id == city_id,
+            Research.research_key == key,
+        )
+        .first()
+    )
+
+    from_level = current.level if current else 0
+    to_level = from_level + 1
+
+    if to_level > MAX_LEVEL:
+        return {
+            "allowed": False,
+            "reason": "Maximum level reached",
+            "research_key": key,
+            "max_level": MAX_LEVEL,
+            "from_level": from_level,
+        }
+
+    prereqs = get_research_prereqs(key, to_level)
+
+    building_levels = {
+        b.type: b.level
+        for b in db.query(Building).filter(Building.city_id == city_id).all()
+    }
+
+    research_levels = {
+        r.research_key: r.level
+        for r in db.query(Research).filter(Research.city_id == city_id).all()
+    }
+
+    missing_prereqs = []
+
+    for prereq_key, required_level in prereqs.items():
+        if prereq_key in building_levels:
+            have_level = building_levels.get(prereq_key, 0)
+            prereq_type = "building"
+        else:
+            have_level = research_levels.get(prereq_key, 0)
+            prereq_type = "research"
+
+        if have_level < required_level:
+            missing_prereqs.append(
+                {
+                    "type": prereq_type,
+                    "key": prereq_key,
+                    "required_level": required_level,
+                    "current_level": have_level,
+                }
+            )
+
+    cost = research_cost(key, to_level)
+    seconds = research_time_seconds(key, to_level)
+
+    have_resources = (
+        city.food >= cost["food"]
+        and city.wood >= cost["wood"]
+        and city.stone >= cost["stone"]
+        and city.iron >= cost["iron"]
+    )
+
+    return {
+        "allowed": not missing_prereqs and have_resources,
+        "research_key": key,
+        "research_name": RESEARCH[key].display_name,
+        "from_level": from_level,
+        "to_level": to_level,
+        "cost": cost,
+        "duration_seconds": seconds,
+        "prerequisites": prereqs,
+        "missing_prerequisites": missing_prereqs,
+        "have_resources": have_resources,
+        "resources": {
+            "food": city.food,
+            "wood": city.wood,
+            "stone": city.stone,
+            "iron": city.iron,
+        },
+    }
+
+@router.get("/{city_id}/research/recommendations")
+def research_recommendations(
+    city_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    city = _get_city_or_404(db, city_id, current_user, x_admin_key)
+
+    building_levels = {
+        b.type: b.level
+        for b in db.query(Building).filter(Building.city_id == city_id).all()
+    }
+
+    research_levels = {
+        r.research_key: r.level
+        for r in db.query(Research).filter(Research.city_id == city_id).all()
+    }
+
+    recommendations = []
+
+    for key, defn in RESEARCH.items():
+        from_level = research_levels.get(key, 0)
+        to_level = from_level + 1
+
+        if to_level > MAX_LEVEL:
+            continue
+
+        prereqs = get_research_prereqs(key, to_level)
+
+        missing_prereqs = []
+
+        for prereq_key, required_level in prereqs.items():
+            if prereq_key in building_levels:
+                have_level = building_levels.get(prereq_key, 0)
+                prereq_type = "building"
+            else:
+                have_level = research_levels.get(prereq_key, 0)
+                prereq_type = "research"
+
+            if have_level < required_level:
+                missing_prereqs.append(
+                    {
+                        "type": prereq_type,
+                        "key": prereq_key,
+                        "required_level": required_level,
+                        "current_level": have_level,
+                    }
+                )
+
+        cost = research_cost(key, to_level)
+        seconds = research_time_seconds(key, to_level)
+
+        have_resources = (
+            city.food >= cost["food"]
+            and city.wood >= cost["wood"]
+            and city.stone >= cost["stone"]
+            and city.iron >= cost["iron"]
+        )
+
+        recommendations.append(
+            {
+                "research_key": key,
+                "research_name": defn.display_name,
+                "from_level": from_level,
+                "to_level": to_level,
+                "allowed": not missing_prereqs and have_resources,
+                "cost": cost,
+                "duration_seconds": seconds,
+                "prerequisites": prereqs,
+                "missing_prerequisites": missing_prereqs,
+                "have_resources": have_resources,
+            }
+        )
+
+    def score_research(item: dict) -> tuple:
+        priority = {
+            "agriculture": 1,
+            "lumbering": 2,
+            "masonry": 3,
+            "iron_working": 4,
+            "construction": 5,
+            "military_tradition": 6,
+        }
+
+        total_cost = (
+            item["cost"]["food"]
+            + item["cost"]["wood"]
+            + item["cost"]["stone"]
+            + item["cost"]["iron"]
+        )
+
+        return (
+            priority.get(item["research_key"], 99),
+            item["to_level"],
+            total_cost,
+            item["duration_seconds"],
+        )
+
+
+    allowed = [r for r in recommendations if r["allowed"]]
+    blocked = [r for r in recommendations if not r["allowed"]]
+
+    allowed.sort(key=score_research)
+    blocked.sort(key=lambda r: (len(r["missing_prerequisites"]), r["research_key"], r["to_level"]))
+
+    return {
+        "city_id": city_id,
+        "recommended_next": allowed[0] if allowed else None,
+        "allowed_count": len(allowed),
+        "blocked_count": len(blocked),
+        "allowed": allowed,
+        "blocked": blocked,
+    }
+
+@router.post("/{city_id}/research")
+def start_research(
+    city_id: int,
+    payload: ResearchStartRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+    city = _get_city_or_404(db, city_id, current_user, x_admin_key)
+
+    key = payload.research_key.strip().lower()
+
+    if key not in RESEARCH:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Research not found",
+                "requested": payload.research_key,
+                "available": sorted(RESEARCH.keys()),
+            },
+        )
+
+    active = (
+        db.query(ResearchQueue)
+        .filter(
+            ResearchQueue.city_id == city_id,
+            ResearchQueue.status == "researching",
+        )
+        .first()
+    )
+    if active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "Research already in progress",
+                "active": {
+                    "research_key": active.research_key,
+                    "from_level": active.from_level,
+                    "to_level": active.to_level,
+                    "finishes_at": active.finishes_at.isoformat(),
+                },
+            },
+        )
+
+    db.query(ResearchQueue).filter(
+        ResearchQueue.city_id == city_id,
+        ResearchQueue.status != "researching",
+    ).delete(synchronize_session=False)
+
+    db.flush()
+
+    current = (
+        db.query(Research)
+        .filter(
+            Research.city_id == city_id,
+            Research.research_key == key,
+        )
+        .first()
+    )
+
+    from_level = current.level if current else 0
+    to_level = from_level + 1
+
+    if to_level > MAX_LEVEL:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Maximum level reached",
+                "max_level": MAX_LEVEL,
+                "research_key": key,
+            },
+        )
+
+    prereqs = get_research_prereqs(key, to_level)
+
+    building_levels = {
+        b.type: b.level
+        for b in db.query(Building).filter(Building.city_id == city_id).all()
+    }
+
+    research_levels = {
+        r.research_key: r.level
+        for r in db.query(Research).filter(Research.city_id == city_id).all()
+    }
+
+    missing_prereqs = []
+
+    for prereq_key, required_level in prereqs.items():
+        if prereq_key in building_levels:
+            have_level = building_levels.get(prereq_key, 0)
+            prereq_type = "building"
+        else:
+            have_level = research_levels.get(prereq_key, 0)
+            prereq_type = "research"
+
+        if have_level < required_level:
+            missing_prereqs.append(
+                {
+                    "type": prereq_type,
+                    "key": prereq_key,
+                    "required_level": required_level,
+                    "current_level": have_level,
+                }
+            )
+
+
+    if missing_prereqs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Missing research prerequisites",
+                "research_key": key,
+                "to_level": to_level,
+                "missing": missing_prereqs,
+            },
+        )
+
+    cost = research_cost(key, to_level)
+
+    if (
+        city.food < cost["food"]
+        or city.wood < cost["wood"]
+        or city.stone < cost["stone"]
+        or city.iron < cost["iron"]
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Insufficient resources", "cost": cost},
+        )
+
+    city.food -= cost["food"]
+    city.wood -= cost["wood"]
+    city.stone -= cost["stone"]
+    city.iron -= cost["iron"]
+
+    started = datetime.utcnow()
+    seconds = research_time_seconds(key, to_level)
+    finishes = started + timedelta(seconds=seconds)
+
+    queue = ResearchQueue(
+        city_id=city_id,
+        research_key=key,
+        from_level=from_level,
+        to_level=to_level,
+        started_at=started,
+        finishes_at=finishes,
+        status="researching",
+        cost_food=cost["food"],
+        cost_wood=cost["wood"],
+        cost_stone=cost["stone"],
+        cost_iron=cost["iron"],
+    )
+
+    db.add(queue)
+    db.commit()
+
+    return {
+        "status": "started",
+        "research_key": key,
+        "research_name": RESEARCH[key].display_name,
+        "from_level": from_level,
+        "to_level": to_level,
+        "cost": cost,
+        "duration_seconds": seconds,
+        "finishes_at": finishes.isoformat(),
+    }
+

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
+from app.constants import MAX_LEVEL
 from app.database import get_db
 from app.models.city import City
 from app.models.building import Building
@@ -51,8 +52,11 @@ def _get_city_or_404(
 
 
 class UpgradeRequest(BaseModel):
-    building_type: str = Field(min_length=2, max_length=32)
+    building_type: str = Field(default="townhall", min_length=2, max_length=32)
 
+class BuildingSetRequest(BaseModel):
+    building_type: str = Field(..., min_length=2, max_length=32)
+    level: int = Field(..., ge=1, le=MAX_LEVEL)
 
 @router.get("/{city_id}/buildings")
 def list_buildings(
@@ -91,7 +95,7 @@ def list_buildings(
 @router.get("/{city_id}/upgrade/preview")
 def preview_upgrade(
     city_id: int,
-    building_type: str = Query(..., min_length=2, max_length=32),
+    building_type: str = Query(default="townhall", min_length=2, max_length=32),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
     x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
@@ -131,6 +135,16 @@ def preview_upgrade(
         }
 
     to_level = b.level + 1
+
+    if to_level > MAX_LEVEL:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Maximum level reached",
+                "max_level": MAX_LEVEL,
+                "building_type": display_building_type(b.type),
+            },
+        )
 
     ok, detail = check_prereqs(building_type=b.type, to_level=to_level, levels=levels)
     if not ok:
@@ -283,6 +297,51 @@ def upgrade_recommendations(
         ),
     }
 
+@router.post("/{city_id}/buildings/set")
+def admin_set_building_level(
+    city_id: int,
+    payload: BuildingSetRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> dict:
+
+    if not _is_admin(x_admin_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    city = db.query(City).filter(City.id == city_id).first()
+    if not city:
+        raise HTTPException(status_code=404, detail="City not found")
+
+    canonical = normalize_building_type(payload.building_type)
+
+    building = (
+        db.query(Building)
+        .filter(
+            Building.city_id == city_id,
+            Building.type == canonical
+        )
+        .first()
+    )
+
+    if not building:
+        raise HTTPException(
+            status_code=404,
+            detail="Building not found"
+        )
+
+    building.level = payload.level
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "city_id": city_id,
+        "building_type": display_building_type(building.type),
+        "canonical_type": building.type,
+        "level": building.level,
+    }
+
 @router.post("/{city_id}/upgrade")
 def start_upgrade(
     city_id: int,
@@ -334,6 +393,16 @@ def start_upgrade(
         )
 
     to_level = b.level + 1
+
+    if to_level > MAX_LEVEL:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Maximum level reached",
+                "max_level": MAX_LEVEL,
+                "building_type": display_building_type(b.type),
+            },
+        )
 
     ok, detail = check_prereqs(
         building_type=b.type,

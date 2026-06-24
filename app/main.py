@@ -11,7 +11,11 @@ from app.routes.buildings import router as buildings_router
 from app.routes.cities import router as cities_router
 from app.routes import raids
 from app.routes import mail
+from app.routes import research
+from app.routes import training
+from app.routes import admin
 from fastapi.security import HTTPBearer
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Evony-like Server", version="0.2.0")
 
@@ -21,6 +25,10 @@ app.include_router(buildings_router)
 app.include_router(cities_router)
 app.include_router(raids.router)
 app.include_router(mail.router)
+app.include_router(research.router)
+app.include_router(training.router)
+app.include_router(admin.router)
+app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 
 @app.get("/health")

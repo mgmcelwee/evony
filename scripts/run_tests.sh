@@ -13,6 +13,10 @@ run() {
 
 run "test_seed.sh"
 run "train_testing.sh"
+run "train_buildings_rules_testing.sh"
+run "train_queue_testing.sh"
+run "train_queue_cancel_testing.sh"
+run "train_queue_pagination_testing.sh"
 run "mail_flow_testing.sh"
 run "mail_pagination_testing.sh"
 run "mail_delete_testing.sh"

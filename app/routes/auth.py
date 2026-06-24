@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta
 
+from fastapi.responses import PlainTextResponse
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -54,7 +55,6 @@ class MeResponse(BaseModel):
     user_id: int
     username: str
     cities: list[dict]
-
 
 def _now_utc_naive() -> datetime:
     # Naive UTC datetime (no tzinfo). Works cleanly with SQLite.
@@ -164,23 +164,20 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
 
     return LoginResponse(token=token, expires_at=expires_at)
 
+@router.get("/token", response_class=PlainTextResponse)
+def token_for_copy(db: Session = Depends(get_db)):
 
-@router.get("/me", response_model=MeResponse)
-def me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> MeResponse:
-    cities = db.query(City).filter(City.owner_id == current_user.id).all()
-    return MeResponse(
-        user_id=current_user.id,
-        username=current_user.username,
-        cities=[
-            {
-                "city_id": c.id,
-                "name": c.name,
-                "townhall_level": c.townhall_level,
-                "food": c.food,
-                "wood": c.wood,
-                "stone": c.stone,
-                "iron": c.iron,
-            }
-            for c in cities
-        ],
+    sess = (
+        db.query(SessionToken)
+        .filter(SessionToken.expires_at > _now_utc_naive())
+        .order_by(SessionToken.created_at.desc())
+        .first()
     )
+
+    if not sess:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active session token found",
+        )
+
+    return sess.token

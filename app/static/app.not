@@ -1,0 +1,241 @@
+let TOKEN = null;
+let NEXT_BEFORE_ID = null;
+
+function el(id) { return document.getElementById(id); }
+
+function normalizeBaseUrl(raw) {
+  const v = (raw || "").trim();
+
+  // If empty, use same-origin (best for LAN + avoids CORS)
+  if (!v) return window.location.origin;
+
+  // If user typed 127.0.0.1 but UI is loaded from another host,
+  // that will point to the browser machine, not the server.
+  // Keep it as-is (some people run UI+API locally), but we’ll at least avoid trailing slashes.
+  return v.replace(/\/+$/, "");
+}
+
+async function api(path, opts = {}) {
+  const base = normalizeBaseUrl(el("baseUrl").value);
+  const url = base + path;
+
+  const headers = opts.headers || {};
+  if (TOKEN) headers["Authorization"] = `Bearer ${TOKEN}`;
+  if (opts.json) headers["Content-Type"] = "application/json";
+
+  let res;
+  try {
+    res = await fetch(url, { ...opts, headers });
+  } catch (e) {
+    // This is the common “Failed to fetch” case
+    throw new Error(`Failed to fetch ${url}. Check Base URL (don’t use 127.0.0.1 from another machine).`);
+  }
+
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* ignore */ }
+
+  if (!res.ok) {
+    const detail = data?.detail ?? data ?? text;
+    const msg = typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+    throw new Error(`HTTP ${res.status}: ${msg}`);
+  }
+  return data;
+}
+
+function setStatus(id, msg) { el(id).textContent = msg || ""; }
+
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+}
+
+// Fallback slot computation if API doesn’t return queueResp.slots yet
+function computeSlots(queueResp) {
+  const rules = queueResp?.rules || {};
+  const items = queueResp?.queue || [];
+
+  const total = Number.isFinite(+queueResp?.slots?.total)
+    ? parseInt(queueResp.slots.total, 10)
+    : parseInt(rules.queue_slots ?? 1, 10);
+
+  // used = count of active statuses in the returned list
+  // (If your API returns paginated history, this is “best effort” for UI gating.)
+  const used = Number.isFinite(+queueResp?.slots?.used)
+    ? parseInt(queueResp.slots.used, 10)
+    : items.filter(i => ["training", "processing"].includes(i.status)).length;
+
+  const free = Number.isFinite(+queueResp?.slots?.free)
+    ? parseInt(queueResp.slots.free, 10)
+    : Math.max(0, (total || 1) - used);
+
+  return {
+    total: Math.max(1, total || 1),
+    used: Math.max(0, used || 0),
+    free: Math.max(0, free || 0),
+  };
+}
+
+async function login() {
+  setStatus("loginStatus", "Logging in...");
+  TOKEN = null;
+
+  const username = el("username").value.trim();
+  const password = el("password").value;
+
+  const data = await api("/auth/login", {
+    method: "POST",
+    json: true,
+    body: JSON.stringify({ username, password }),
+    headers: {}
+  });
+
+  TOKEN = data.token;
+  setStatus("loginStatus", `✅ Logged in`);
+  await refreshAll(true);
+}
+
+async function refreshCity() {
+  const cityId = parseInt(el("cityId").value, 10);
+  const city = await api(`/cities/${cityId}`);
+  const troops = await api(`/cities/${cityId}/troops`);
+
+  // /cities/{id} has resources nested under "resources"
+  el("resourcesBox").textContent = JSON.stringify(city.resources, null, 2);
+  el("troopsBox").textContent = JSON.stringify(troops.troops, null, 2);
+}
+
+function renderQueue(queueResp, append=false) {
+  const list = el("queueList");
+  if (!append) list.innerHTML = "";
+
+  const rules = queueResp?.rules || {};
+  const slots = computeSlots(queueResp);
+
+  // Slots + barracks indicators
+  el("slotsLine").textContent = `Slots: ${slots.used} / ${slots.total} (free ${slots.free})`;
+  el("barracksLine").textContent = `Barracks: L${rules.barracks_level ?? "?"} (max_batch ${rules.max_batch ?? "?"})`;
+
+  // Disable enqueue if full
+  el("enqueueBtn").disabled = (slots.free <= 0);
+
+  for (const item of (queueResp.queue || [])) {
+    const div = document.createElement("div");
+    div.className = "item";
+
+    const cost = item.cost || { food:0, wood:0, stone:0, iron:0 };
+
+    div.innerHTML = `
+      <div class="itemTop">
+        <div>
+          <div><b>#${item.id}</b> ${item.name} <span class="small">(${item.code})</span></div>
+          <div class="small">count=${item.count} | status=${item.status} | finishes=${fmtTime(item.finishes_at)}</div>
+        </div>
+        <div>
+          ${item.status === "training" ? `<button data-cancel="${item.id}">Cancel</button>` : ``}
+        </div>
+      </div>
+      <div class="small">cost: food=${cost.food} wood=${cost.wood} stone=${cost.stone} iron=${cost.iron}</div>
+    `;
+    list.appendChild(div);
+  }
+
+  // wire cancel buttons
+  list.querySelectorAll("button[data-cancel]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const cityId = parseInt(el("cityId").value, 10);
+      const qid = btn.getAttribute("data-cancel");
+      setStatus("enqueueStatus", `Cancelling #${qid}...`);
+      try {
+        await api(`/cities/${cityId}/train/queue/${qid}/cancel`, { method: "POST" });
+        setStatus("enqueueStatus", `✅ Cancelled #${qid}`);
+        await refreshAll(true);
+      } catch (e) {
+        setStatus("enqueueStatus", `❌ ${e.message}`);
+      }
+    });
+  });
+
+  NEXT_BEFORE_ID = queueResp.next_before_id ?? null;
+  el("loadMoreBtn").disabled = !NEXT_BEFORE_ID;
+}
+
+async function refreshQueue(resetPaging=true) {
+  const cityId = parseInt(el("cityId").value, 10);
+  if (resetPaging) NEXT_BEFORE_ID = null;
+
+  const q = new URLSearchParams();
+  q.set("limit", "10");
+  if (NEXT_BEFORE_ID) q.set("before_id", String(NEXT_BEFORE_ID));
+
+  const queueResp = await api(`/cities/${cityId}/train/queue?${q.toString()}`);
+  renderQueue(queueResp, !resetPaging);
+}
+
+async function refreshAll(resetPaging=true) {
+  setStatus("cityStatus", "Refreshing...");
+  try {
+    await refreshCity();
+    await refreshQueue(true);
+    setStatus("cityStatus", "✅");
+  } catch (e) {
+    setStatus("cityStatus", `❌ ${e.message}`);
+  }
+}
+
+async function enqueue() {
+  const cityId = parseInt(el("cityId").value, 10);
+  const code = el("trainCode").value.trim();
+  const count = parseInt(el("trainCount").value, 10);
+
+  setStatus("enqueueStatus", "Enqueueing...");
+  try {
+    await api(`/cities/${cityId}/train/queue`, {
+      method: "POST",
+      json: true,
+      body: JSON.stringify({ troops: [{ code, count }] })
+    });
+    setStatus("enqueueStatus", "✅ Enqueued");
+    await refreshAll(true);
+  } catch (e) {
+    setStatus("enqueueStatus", `❌ ${e.message}`);
+  }
+}
+
+function initBaseUrlDefault() {
+  // If empty, set to same origin (best default)
+  if (!el("baseUrl").value.trim()) {
+    el("baseUrl").value = window.location.origin;
+  }
+}
+
+function wire() {
+  initBaseUrlDefault();
+
+  el("loginBtn").addEventListener("click", () =>
+    login().catch(e => setStatus("loginStatus", `❌ ${e.message}`))
+  );
+  el("refreshBtn").addEventListener("click", () => refreshAll(true));
+  el("enqueueBtn").addEventListener("click", () => enqueue());
+
+  el("loadMoreBtn").addEventListener("click", async () => {
+    if (!NEXT_BEFORE_ID) return;
+    try {
+      const cityId = parseInt(el("cityId").value, 10);
+      const q = new URLSearchParams();
+      q.set("limit", "10");
+      q.set("before_id", String(NEXT_BEFORE_ID));
+      const queueResp = await api(`/cities/${cityId}/train/queue?${q.toString()}`);
+      renderQueue(queueResp, true);
+    } catch (e) {
+      setStatus("enqueueStatus", `❌ ${e.message}`);
+    }
+  });
+
+  // auto-refresh (every 5s)
+  setInterval(() => {
+    if (TOKEN) refreshAll(true).catch(() => {});
+  }, 5000);
+}
+
+wire();
+

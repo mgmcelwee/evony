@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+import math
 
 from sqlalchemy.orm import Session
+from sqlalchemy import update
 
 from app.game.raid_mail import send_raid_result_mail
 from app.models.building import Building
@@ -15,6 +17,9 @@ from app.models.city_troop import CityTroop
 from app.models.raid_troop import RaidTroop
 from app.models.troop_type import TroopType
 from app.models.raid_defender_troop import RaidDefenderTroop
+from app.models.training_queue import TrainingQueue
+from app.models.research import Research
+from app.models.research_queue import ResearchQueue
 
 # ----------------------------
 # Helpers: Rates + Storage
@@ -628,6 +633,20 @@ def _next_event_time(db: Session, after: datetime, hard_stop: datetime) -> Optio
         .order_by(Upgrade.completes_at.asc())
         .first()
     )
+    
+    next_training = (
+        db.query(TrainingQueue)
+        .filter(
+            TrainingQueue.status == "training",
+            TrainingQueue.finishes_at > after,
+            TrainingQueue.finishes_at <= hard_stop,
+        )
+        .order_by(TrainingQueue.finishes_at.asc())
+        .first()
+    )
+    if next_training:
+        next_times.append(next_training.finishes_at)
+
     if next_upgrade:
         next_times.append(next_upgrade.completes_at)
 
@@ -636,6 +655,136 @@ def _next_event_time(db: Session, after: datetime, hard_stop: datetime) -> Optio
 
     return min(next_times)
 
+    next_research = (
+        db.query(ResearchQueue)
+        .filter(
+            ResearchQueue.status == "researching",
+            ResearchQueue.finishes_at > after,
+            ResearchQueue.finishes_at <= hard_stop,
+        )
+        .order_by(ResearchQueue.finishes_at.asc())
+        .first()
+    )
+    if next_research:
+        next_times.append(next_research.finishes_at)
+
+def finalize_training_queue(db: Session, now: datetime) -> int:
+    # grab candidate IDs first (cheap, deterministic ordering)
+    ids = [
+        r[0]
+        for r in (
+            db.query(TrainingQueue.id)
+            .filter(
+                TrainingQueue.status == "training",
+                TrainingQueue.finishes_at <= now,
+            )
+            .order_by(TrainingQueue.id.asc())
+            .all()
+        )
+    ]
+
+    finalized = 0
+
+    for tq_id in ids:
+        # 1) CLAIM: flip training -> processing atomically
+        res = db.execute(
+            update(TrainingQueue)
+            .where(
+                TrainingQueue.id == tq_id,
+                TrainingQueue.status == "training",
+            )
+            .values(status="processing")
+        )
+        if res.rowcount != 1:
+            # someone else claimed it (or it changed); do nothing
+            continue
+
+        db.flush()
+
+        # 2) Load the row we claimed
+        tq = db.query(TrainingQueue).filter(TrainingQueue.id == tq_id).first()
+        if not tq:
+            continue
+
+        # 3) Credit troops
+        ct = (
+            db.query(CityTroop)
+            .filter(
+                CityTroop.city_id == tq.city_id,
+                CityTroop.troop_type_id == tq.troop_type_id,
+            )
+            .first()
+        )
+        if not ct:
+            ct = CityTroop(city_id=tq.city_id, troop_type_id=tq.troop_type_id, count=0)
+            db.add(ct)
+            db.flush()
+
+        ct.count = int(getattr(ct, "count", 0) or 0) + int(tq.count)
+
+        # 4) Mark completed
+        tq.status = "completed"
+        finalized += 1
+
+    return finalized
+
+def finalize_research_queue(db: Session, now: datetime) -> int:
+    ids = [
+        r[0]
+        for r in (
+            db.query(ResearchQueue.id)
+            .filter(
+                ResearchQueue.status == "researching",
+                ResearchQueue.finishes_at <= now,
+            )
+            .order_by(ResearchQueue.id.asc())
+            .all()
+        )
+    ]
+
+    finalized = 0
+
+    for rq_id in ids:
+        res = db.execute(
+            update(ResearchQueue)
+            .where(
+                ResearchQueue.id == rq_id,
+                ResearchQueue.status == "researching",
+            )
+            .values(status="processing")
+        )
+        if res.rowcount != 1:
+            continue
+
+        db.flush()
+
+        rq = db.query(ResearchQueue).filter(ResearchQueue.id == rq_id).first()
+        if not rq:
+            continue
+
+        row = (
+            db.query(Research)
+            .filter(
+                Research.city_id == rq.city_id,
+                Research.research_key == rq.research_key,
+            )
+            .first()
+        )
+
+        if not row:
+            row = Research(
+                city_id=rq.city_id,
+                research_key=rq.research_key,
+                level=0,
+            )
+            db.add(row)
+            db.flush()
+
+        row.level = max(int(row.level or 0), int(rq.to_level))
+        rq.status = "completed"
+        finalized += 1
+
+    return finalized
 
 # ----------------------------
 # Main tick runner
@@ -658,6 +807,8 @@ def tick_all_cities(db: Session, now: datetime) -> Dict[str, object]:
 
     raids_arrived = 0
     raids_returned = 0
+    training_finalized = 0
+    research_finalized = 0
 
     while True:
         nxt = _next_event_time(db, current_time, now)
@@ -675,6 +826,9 @@ def tick_all_cities(db: Session, now: datetime) -> Dict[str, object]:
 
         raids_arrived += _resolve_arrivals_to_returning_at(db, event_time)
         raids_returned += _resolve_returns_to_resolved_at(db, event_time)
+        
+        training_finalized += finalize_training_queue(db, event_time)
+        research_finalized += finalize_research_queue(db, event_time)
 
         current_time = event_time
 
@@ -690,5 +844,7 @@ def tick_all_cities(db: Session, now: datetime) -> Dict[str, object]:
         "upgrades_completed": upgrades_completed,
         "raids_arrived": raids_arrived,
         "raids_returned": raids_returned,
+        "training_finalized": training_finalized,
+        "research_finalized": research_finalized,
         "at": now.isoformat(),
     }
