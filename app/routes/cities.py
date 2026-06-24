@@ -212,10 +212,10 @@ def get_city(
             "iron_rate": iron_rate,
         },
         "caps": {
-            "max_food": city.max_food,
-            "max_wood": city.max_wood,
-            "max_stone": city.max_stone,
-            "max_iron": city.max_iron,
+            "food": city.max_food,
+            "wood": city.max_wood,
+            "stone": city.max_stone,
+            "iron": city.max_iron,
         },
         "protected": {
             "food": city.protected_food,
