@@ -14,6 +14,7 @@ from app.routes import mail
 from app.routes import research
 from app.routes import training
 from app.routes import admin
+from app.routes import heroes
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +29,7 @@ app.include_router(mail.router)
 app.include_router(research.router)
 app.include_router(training.router)
 app.include_router(admin.router)
+app.include_router(heroes.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 
