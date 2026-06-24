@@ -34,6 +34,7 @@ def _hero_to_dict(hero: Hero) -> dict:
             "research_speed": int(hero.governor_research_speed_bonus),
             "training_speed": int(hero.governor_training_speed_bonus),
             "production": int(hero.governor_production_bonus),
+	    "building_speed": int(hero.governor_building_speed_bonus),
         },
     }
 
