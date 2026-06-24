@@ -30,6 +30,11 @@ def _hero_to_dict(hero: Hero) -> dict:
             "training_speed": int(hero.training_speed_bonus),
             "research_speed": int(hero.research_speed_bonus),
         },
+        "governor_bonuses": {
+            "research_speed": int(hero.governor_research_speed_bonus),
+            "training_speed": int(hero.governor_training_speed_bonus),
+            "production": int(hero.governor_production_bonus),
+        },
     }
 
 class HeroCreateRequest(BaseModel):
@@ -51,25 +56,8 @@ def list_heroes(
         "ok": True,
         "city_id": int(city.id),
         "count": len(rows),
-        "heroes": [
-            {
-                "id": int(h.id),
-                "name": h.name,
-                "level": int(h.level),
-                "xp": int(h.xp),
-                "status": h.status,
-                "bonuses": {
-                    "attack": int(h.attack_bonus),
-                    "defense": int(h.defense_bonus),
-                    "march_speed": int(h.march_speed_bonus),
-                    "training_speed": int(h.training_speed_bonus),
-                    "research_speed": int(h.research_speed_bonus),
-                },
-            }
-            for h in rows
-        ],
+        "heroes": [_hero_to_dict(h) for h in rows]
     }
-
 
 @router.post("/{city_id}/heroes")
 def create_hero(

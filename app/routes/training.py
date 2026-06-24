@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from app.config import ADMIN_KEY
 from app.database import get_db
 from app.models.city import City
+from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.tick_util import tick_world_now
 from app.models.city_troop import CityTroop
@@ -149,6 +150,36 @@ def _check_affordable(city: City, cost: dict) -> dict:
             missing[k] = int(v) - have[k]
     return {"ok": (len(missing) == 0), "have": have, "missing": missing}
 
+def _get_governor_training_bonus(db: Session, city_id: int) -> dict:
+    governor = (
+        db.query(Hero)
+        .filter(
+            Hero.city_id == int(city_id),
+            Hero.status == "governor",
+        )
+        .first()
+    )
+
+    bonus = (
+        int(getattr(governor, "governor_training_speed_bonus", 0) or 0)
+        if governor
+        else 0
+    )
+    bonus = max(0, min(bonus, 90))
+
+    return {
+        "governor": governor,
+        "bonus": bonus,
+    }
+
+def seconds_for(tt: TroopType, count: int, barracks_level: int, governor_bonus: int = 0) -> int:
+    tier = int(getattr(tt, "tier", 1) or 1)
+    sec_per_unit = 1 + tier
+    barracks_mult = max(0.50, 1.0 - 0.03 * (max(1, int(barracks_level)) - 1))
+    governor_mult = max(0.10, (100 - int(governor_bonus)) / 100.0)
+    seconds = int(math.ceil(float(sec_per_unit) * int(count) * float(barracks_mult) * float(governor_mult)))
+    return max(1, seconds)
+
 @router.post("/{city_id}/train/preview")
 def train_preview(
     city_id: int,
@@ -214,6 +245,18 @@ def train_preview(
 
     total_cost = _sum_cost(costs)
     afford = _check_affordable(city, total_cost)
+    gov = _get_governor_training_bonus(db, int(city.id))
+
+    barracks_level = int(rules.get("barracks_level", 1) or 1)
+    governor_training_bonus = int(gov["bonus"])
+
+    base_duration_seconds = 0
+    duration_seconds = 0
+
+    for code, cnt in want_by_code.items():
+        tt = by_code[code]
+        base_duration_seconds += seconds_for(tt, cnt, barracks_level, 0)
+        duration_seconds += seconds_for(tt, cnt, barracks_level, governor_training_bonus)
 
     return {
         "ok": True,
@@ -222,9 +265,16 @@ def train_preview(
         "total_units": int(total_units),
         "troops": breakdown,
         "total_cost": total_cost,
+        "base_duration_seconds": int(base_duration_seconds),
+        "duration_seconds": int(duration_seconds),
         "affordable": bool(afford["ok"]),
         "have": afford["have"],
         "missing": afford["missing"],
+        "governor_bonus": {
+            "hero_id": gov["governor"].id if gov["governor"] else None,
+            "name": gov["governor"].name if gov["governor"] else None,
+            "governor_training_speed_bonus": gov["bonus"],
+        },
     }
 
 @router.get("/{city_id}/train/queue")
@@ -456,22 +506,10 @@ def train_queue(
     if missing_codes:
         raise HTTPException(status_code=400, detail={"error": "Unknown troop code(s)", "codes": missing_codes})
 
-    # ---- Timing rule (tune freely) ----
-    # Keep it dead simple + deterministic:
-    # - base seconds per unit increases with tier
-    # - barracks reduces time by 3% per level, floor at 50% time
-    def seconds_for(tt: TroopType, count: int, barracks_level: int) -> int:
-        tier = int(getattr(tt, "tier", 1) or 1)
-
-        # example curve: T1=2s/unit, T2=3s/unit, T3=4s/unit, ...
-        sec_per_unit = 1 + tier
-
-        time_mult = max(0.50, 1.0 - 0.03 * (max(1, int(barracks_level)) - 1))
-        seconds = int(math.ceil(float(sec_per_unit) * int(count) * float(time_mult)))
-        return max(1, seconds)
-
     now = datetime.utcnow()
     barracks_level = int(rules.get("barracks_level", 1) or 1)
+    gov = _get_governor_training_bonus(db, int(city.id))
+    governor_training_bonus = int(gov["bonus"])
 
     # compute costs + affordability (charge immediately)
     breakdown = []
@@ -515,11 +553,20 @@ def train_queue(
     city.iron = int(getattr(city, "iron", 0) or 0) - int(total_cost["iron"])
 
     # create queue rows
+    base_duration_seconds = 0
+    duration_seconds = 0
     queued = []
+
     for code, cnt in want_by_code.items():
         tt = by_code[code]
-        cost = per_line_cost[code]
-        seconds_total = seconds_for(tt, cnt, barracks_level)
+
+        base_seconds_total = seconds_for(tt, cnt, barracks_level, 0)
+        seconds_total = seconds_for(tt, cnt, barracks_level, governor_training_bonus)
+
+        base_duration_seconds += int(base_seconds_total)
+        duration_seconds += int(seconds_total)
+
+        finishes_at = now + timedelta(seconds=seconds_total)
 
         tq = TrainingQueue(
             city_id=int(city.id),
@@ -527,35 +574,30 @@ def train_queue(
             count=int(cnt),
             status="training",
             started_at=now,
-            finishes_at=now + timedelta(seconds=int(seconds_total)),
-            cost_food=int(cost["food"]),
-            cost_wood=int(cost["wood"]),
-            cost_stone=int(cost["stone"]),
-            cost_iron=int(cost["iron"]),
+            finishes_at=finishes_at,
             seconds_total=int(seconds_total),
+            cost_food=int(per_line_cost[code]["food"]),
+            cost_wood=int(per_line_cost[code]["wood"]),
+            cost_stone=int(per_line_cost[code]["stone"]),
+            cost_iron=int(per_line_cost[code]["iron"]),
         )
+
         db.add(tq)
         db.flush()
 
-        queued.append(
-            {
-                "id": int(tq.id),
-                "code": tt.code,
-                "name": tt.name,
-                "tier": int(getattr(tt, "tier", 0) or 0),
-                "count": int(tq.count),
-                "status": tq.status,
-                "started_at": tq.started_at.isoformat(),
-                "finishes_at": tq.finishes_at.isoformat(),
-                "seconds_total": int(tq.seconds_total),
-                "cost": {
-                    "food": int(tq.cost_food),
-                    "wood": int(tq.cost_wood),
-                    "stone": int(tq.cost_stone),
-                    "iron": int(tq.cost_iron),
-                },
-            }
-        )
+        queued.append({
+            "id": int(tq.id),
+            "code": tt.code,
+            "name": tt.name,
+            "tier": int(getattr(tt, "tier", 0) or 0),
+            "count": int(cnt),
+            "status": tq.status,
+            "started_at": tq.started_at.isoformat(),
+            "finishes_at": tq.finishes_at.isoformat(),
+            "base_seconds_total": int(base_seconds_total),
+            "seconds_total": int(seconds_total),
+            "cost": per_line_cost[code],
+        })
 
     db.commit()
     db.refresh(city)
@@ -567,7 +609,14 @@ def train_queue(
         "total_units": int(total_units),
         "queued": queued,
         "total_cost": total_cost,
-        "resources_after": {
+	"base_duration_seconds": int(base_duration_seconds),
+	"duration_seconds": int(duration_seconds),
+	"governor_bonus": {
+	    "hero_id": gov["governor"].id if gov["governor"] else None,
+	    "name": gov["governor"].name if gov["governor"] else None,
+	    "governor_training_speed_bonus": int(gov["bonus"]),
+	},
+	"resources_after": {
             "food": int(city.food),
             "wood": int(city.wood),
             "stone": int(city.stone),
@@ -579,5 +628,10 @@ def train_queue(
             "free": max(0, int(slots_total) - (int(active_count) + len(queued))),
         },
         "note": "Troops will appear after finishes_at when a tick occurs (any tick-on-read endpoint).",
+        "governor_bonus": {
+            "hero_id": gov["governor"].id if gov["governor"] else None,
+            "name": gov["governor"].name if gov["governor"] else None,
+            "governor_training_speed_bonus": gov["bonus"],
+        },
     }
 

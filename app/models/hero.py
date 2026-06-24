@@ -17,5 +17,8 @@ class Hero(Base):
     march_speed_bonus = Column(Integer, nullable=False, default=0)
     training_speed_bonus = Column(Integer, nullable=False, default=0)
     research_speed_bonus = Column(Integer, nullable=False, default=0)
-
+    governor_research_speed_bonus = Column(Integer, nullable=False, default=0)
+    governor_training_speed_bonus = Column(Integer, nullable=False, default=0)
+    governor_production_bonus = Column(Integer, nullable=False, default=0)
+    
     status = Column(String, nullable=False, default="idle")

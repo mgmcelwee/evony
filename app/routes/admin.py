@@ -3,10 +3,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Body
 
-router = APIRouter(
-    prefix="/admin",
-    tags=["admin"]
-)
 from sqlalchemy.orm import Session
 
 from pydantic import BaseModel, Field
@@ -34,6 +30,11 @@ from app.routes.training import (
 )
 from app.routes.tick_util import tick_world_now
 
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin"]
+)
+
 class HeroSetRequest(BaseModel):
     name: str = Field(default="Roland", min_length=2, max_length=50)
     level: int = Field(default=1, ge=1, le=100)
@@ -44,6 +45,10 @@ class HeroSetRequest(BaseModel):
     training_speed_bonus: int = Field(default=0, ge=0)
     research_speed_bonus: int = Field(default=0, ge=0)
     status: str = Field(default="idle")
+    governor_research_speed_bonus: int = Field(default=0, ge=0)
+    governor_training_speed_bonus: int = Field(default=0, ge=0)
+    governor_production_bonus: int = Field(default=0, ge=0)
+
 
 class HeroUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=50)
@@ -55,7 +60,9 @@ class HeroUpdateRequest(BaseModel):
     training_speed_bonus: int | None = Field(default=None, ge=0)
     research_speed_bonus: int | None = Field(default=None, ge=0)
     status: str | None = Field(default=None)
-
+    governor_research_speed_bonus: int | None = Field(default=None, ge=0)
+    governor_training_speed_bonus: int | None = Field(default=None, ge=0)
+    governor_production_bonus: int | None = Field(default=None, ge=0)
 
 class HeroRenameRequest(BaseModel):
     name: str = Field(default="Roland", min_length=2, max_length=50)
@@ -83,7 +90,12 @@ def _hero_to_dict(hero: Hero) -> dict:
             "training_speed": int(hero.training_speed_bonus),
             "research_speed": int(hero.research_speed_bonus),
         },
-    }
+        "governor_bonuses": {
+            "research_speed": int(hero.governor_research_speed_bonus),
+            "training_speed": int(hero.governor_training_speed_bonus),
+            "production": int(hero.governor_production_bonus),
+        },    
+}
 
 @router.post("/cities/{city_id}/research/set")
 def admin_set_research_level(
@@ -345,6 +357,9 @@ def admin_set_hero(
         march_speed_bonus=payload.march_speed_bonus,
         training_speed_bonus=payload.training_speed_bonus,
         research_speed_bonus=payload.research_speed_bonus,
+        governor_research_speed_bonus=payload.governor_research_speed_bonus,
+        governor_training_speed_bonus=payload.governor_training_speed_bonus,
+        governor_production_bonus=payload.governor_production_bonus,
         status=payload.status.strip(),
     )
 
@@ -355,21 +370,9 @@ def admin_set_hero(
     return {
         "ok": True,
         "city_id": city_id,
-        "hero": {
-            "id": hero.id,
-            "name": hero.name,
-            "level": hero.level,
-            "xp": hero.xp,
-            "status": hero.status,
-            "bonuses": {
-                "attack": hero.attack_bonus,
-                "defense": hero.defense_bonus,
-                "march_speed": hero.march_speed_bonus,
-                "training_speed": hero.training_speed_bonus,
-                "research_speed": hero.research_speed_bonus,
-            },
-        },
+        "hero": _hero_to_dict(hero),
     }
+
 @router.get("/heroes/{hero_id}")
 def admin_get_hero(
     hero_id: int,

@@ -13,6 +13,7 @@ from app.models.building import Building
 from app.models.city import City
 from app.models.research import Research
 from app.models.research_queue import ResearchQueue
+from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.buildings import _get_city_or_404
 
@@ -155,7 +156,29 @@ def preview_research(
             )
 
     cost = research_cost(key, to_level)
-    seconds = research_time_seconds(key, to_level)
+    base_seconds = research_time_seconds(key, to_level)
+
+    governor = (
+        db.query(Hero)
+        .filter(
+            Hero.city_id == city_id,
+            Hero.status == "governor",
+        )
+        .first()
+    )
+
+    research_bonus = (
+        int(getattr(governor, "governor_research_speed_bonus", 0) or 0)
+        if governor
+        else 0
+    )
+
+    research_bonus = max(0, min(research_bonus, 90))
+
+    seconds = max(
+        1,
+        int(base_seconds * (100 - research_bonus) / 100)
+    )
 
     have_resources = (
         city.food >= cost["food"]
@@ -175,6 +198,12 @@ def preview_research(
         "prerequisites": prereqs,
         "missing_prerequisites": missing_prereqs,
         "have_resources": have_resources,
+        "base_duration_seconds": base_seconds,
+        "governor_bonus": {
+            "hero_id": governor.id if governor else None,
+            "name": governor.name if governor else None,
+            "governor_research_speed_bonus": research_bonus,
+        },
         "resources": {
             "food": city.food,
             "wood": city.wood,
@@ -434,7 +463,31 @@ def start_research(
     city.iron -= cost["iron"]
 
     started = datetime.utcnow()
-    seconds = research_time_seconds(key, to_level)
+
+    base_seconds = research_time_seconds(key, to_level)
+
+    governor = (
+        db.query(Hero)
+        .filter(
+            Hero.city_id == city_id,
+            Hero.status == "governor",
+        )
+        .first()
+    )
+
+    research_bonus = (
+        int(getattr(governor, "governor_research_speed_bonus", 0) or 0)
+        if governor
+        else 0
+    )
+
+    research_bonus = max(0, min(research_bonus, 90))
+
+    seconds = max(
+        1,
+        int(base_seconds * (100 - research_bonus) / 100)
+    )
+
     finishes = started + timedelta(seconds=seconds)
 
     queue = ResearchQueue(
@@ -461,6 +514,12 @@ def start_research(
         "from_level": from_level,
         "to_level": to_level,
         "cost": cost,
+        "base_duration_seconds": base_seconds,
+        "governor_bonus": {
+            "hero_id": governor.id if governor else None,
+            "name": governor.name if governor else None,
+            "governor_research_speed_bonus": research_bonus,
+        },
         "duration_seconds": seconds,
         "finishes_at": finishes.isoformat(),
     }
