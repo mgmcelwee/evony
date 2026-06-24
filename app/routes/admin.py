@@ -48,7 +48,7 @@ class HeroSetRequest(BaseModel):
     governor_research_speed_bonus: int = Field(default=0, ge=0)
     governor_training_speed_bonus: int = Field(default=0, ge=0)
     governor_production_bonus: int = Field(default=0, ge=0)
-
+    governor_building_speed_bonus: int = Field(default=0, ge=0)
 
 class HeroUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=50)
@@ -63,6 +63,7 @@ class HeroUpdateRequest(BaseModel):
     governor_research_speed_bonus: int | None = Field(default=None, ge=0)
     governor_training_speed_bonus: int | None = Field(default=None, ge=0)
     governor_production_bonus: int | None = Field(default=None, ge=0)
+    governor_building_speed_bonus: int | None = Field(default=None, ge=0)
 
 class HeroRenameRequest(BaseModel):
     name: str = Field(default="Roland", min_length=2, max_length=50)
@@ -94,6 +95,7 @@ def _hero_to_dict(hero: Hero) -> dict:
             "research_speed": int(hero.governor_research_speed_bonus),
             "training_speed": int(hero.governor_training_speed_bonus),
             "production": int(hero.governor_production_bonus),
+            "building_speed": int(hero.governor_building_speed_bonus),
         },    
 }
 
@@ -360,6 +362,7 @@ def admin_set_hero(
         governor_research_speed_bonus=payload.governor_research_speed_bonus,
         governor_training_speed_bonus=payload.governor_training_speed_bonus,
         governor_production_bonus=payload.governor_production_bonus,
+        governor_building_speed_bonus=payload.governor_building_speed_bonus,
         status=payload.status.strip(),
     )
 

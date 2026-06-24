@@ -15,6 +15,7 @@ from app.database import get_db
 from app.models.city import City
 from app.models.building import Building
 from app.models.upgrade import Upgrade
+from app.models.hero import Hero
 from app.routes.auth import get_current_user
 
 from app.game.building_rules import (
@@ -30,6 +31,28 @@ router = APIRouter(prefix="/cities", tags=["buildings"])
 
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
+def _get_governor_building_bonus(db: Session, city_id: int) -> dict:
+    governor = (
+        db.query(Hero)
+        .filter(
+            Hero.city_id == int(city_id),
+            Hero.status == "governor",
+        )
+        .first()
+    )
+
+    bonus = (
+        int(getattr(governor, "governor_building_speed_bonus", 0) or 0)
+        if governor
+        else 0
+    )
+    bonus = max(0, min(bonus, 90))
+
+    return {"governor": governor, "bonus": bonus}
+
+def _apply_speed_bonus(base_seconds: int, bonus: int) -> int:
+    bonus = max(0, min(int(bonus or 0), 90))
+    return max(1, int(base_seconds * (100 - bonus) / 100))
 
 def _is_admin(x_admin_key: str | None) -> bool:
     return bool(ADMIN_KEY) and bool(x_admin_key) and secrets.compare_digest(x_admin_key, ADMIN_KEY)
@@ -158,7 +181,9 @@ def preview_upgrade(
         }
 
     cost = upgrade_cost(b.type, to_level)
-    seconds = upgrade_time_seconds(b.type, to_level)
+    base_seconds = upgrade_time_seconds(b.type, to_level)
+    gov = _get_governor_building_bonus(db, int(city.id))
+    seconds = _apply_speed_bonus(base_seconds, int(gov["bonus"]))
 
     # Resource sufficiency breakdown
     insufficient = {}
@@ -178,7 +203,13 @@ def preview_upgrade(
         "from_level": b.level,
         "to_level": to_level,
         "cost": cost,
-        "duration_seconds": seconds,
+	"base_duration_seconds": int(base_seconds),
+	"duration_seconds": int(seconds),
+	"governor_bonus": {
+    	"hero_id": gov["governor"].id if gov["governor"] else None,
+    	"name": gov["governor"].name if gov["governor"] else None,
+    	"governor_building_speed_bonus": int(gov["bonus"]),
+	},
         "have_resources": len(insufficient) == 0,
         "insufficient": insufficient,
     }
@@ -433,8 +464,10 @@ def start_upgrade(
     city.iron -= cost["iron"]
 
     started = datetime.utcnow()
-    seconds = upgrade_time_seconds(b.type, to_level)
-    completes = started + timedelta(seconds=seconds)
+    base_seconds = upgrade_time_seconds(building_type, to_level)
+    gov = _get_governor_building_bonus(db, int(city.id))
+    seconds = _apply_speed_bonus(base_seconds, int(gov["bonus"]))
+    completes_at = datetime.utcnow() + timedelta(seconds=seconds)
 
     up = Upgrade(
         city_id=city_id,
@@ -464,6 +497,12 @@ def start_upgrade(
         "from_level": b.level,
         "to_level": to_level,
         "cost": cost,
+	"base_duration_seconds": int(base_seconds),
+	"duration_seconds": int(seconds),
+	"governor_bonus": {
+    	"hero_id": gov["governor"].id if gov["governor"] else None,
+    	"name": gov["governor"].name if gov["governor"] else None,
+    	"governor_building_speed_bonus": int(gov["bonus"]),
+	},
         "completes_at": completes.isoformat(),
-        "duration_seconds": seconds,
     }
