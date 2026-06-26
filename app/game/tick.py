@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 import math
+import json
 
 from sqlalchemy.orm import Session
 from sqlalchemy import update
@@ -21,6 +22,8 @@ from app.models.raid_defender_troop import RaidDefenderTroop
 from app.models.training_queue import TrainingQueue
 from app.models.research import Research
 from app.models.research_queue import ResearchQueue
+from app.models.hero import Hero
+from app.game.hero_progression import add_hero_xp
 
 # ----------------------------
 # Helpers: Rates + Storage
@@ -129,6 +132,59 @@ def apply_city_tick(city: City, now: datetime, db: Session) -> int:
     city.last_tick_at = last + timedelta(minutes=minutes)
     return minutes
 
+
+def _award_raid_xp(db: Session, raid: Raid) -> dict | None:
+    xp = 10
+
+    loot_total = (
+        int(raid.stolen_food or 0)
+        + int(raid.stolen_wood or 0)
+        + int(raid.stolen_stone or 0)
+        + int(raid.stolen_iron or 0)
+    )
+
+    if loot_total > 0:
+        xp += 5
+
+    return _award_governor_xp(db, int(raid.attacker_city_id), xp)
+
+def _award_governor_xp(db: Session, city_id: int, amount: int) -> dict | None:
+    hero = (
+        db.query(Hero)
+        .filter(
+            Hero.city_id == int(city_id),
+            Hero.status == "governor",
+        )
+        .first()
+    )
+
+    if not hero:
+        return None
+
+    level_before = int(hero.level or 1)
+    xp_before = int(hero.xp or 0)
+
+    result = add_hero_xp(hero, int(amount))
+
+    level_after = int(hero.level or level_before)
+    current_level_xp = int(hero.xp or 0)
+
+    progress = {
+        "hero_id": int(hero.id),
+        "name": hero.name,
+        "specialty": hero.specialty,
+        "level": level_before,
+        "xp_before": xp_before,
+        "xp_awarded": int(amount),
+        "current_level_xp": current_level_xp,
+        "xp_to_next_level": int(result.get("next_level_xp", 0)) - current_level_xp,
+        "leveled_up": bool(result.get("leveled_up", 0)),
+    }
+
+    if level_after > level_before:
+        progress["new_level"] = level_after
+
+    return progress
 
 # ----------------------------
 # Raids: helpers
@@ -525,6 +581,11 @@ def _resolve_returns_to_resolved_at(db: Session, event_time: datetime) -> int:
             attacker.stone = min(attacker.max_stone, attacker.stone + stolen_stone)
             attacker.iron = min(attacker.max_iron, attacker.iron + stolen_iron)
 
+        hero_progress = _award_raid_xp(db, r)
+
+        if hero_progress:
+            r.hero_progress_json = json.dumps(hero_progress)
+
         # NEW: drop raid-result mail into both players' inboxes
         # (Use r.id — your loop var is r)
         send_raid_result_mail(db, raid_id=r.id, now=event_time)
@@ -566,9 +627,12 @@ def _complete_due_upgrades_at(db: Session, event_time: datetime) -> int:
             .filter(Building.city_id == up.city_id, Building.type == up.building_type)
             .first()
         )
+
         if b:
             b.level = up.to_level
             touched_city_ids.add(up.city_id)
+
+            _award_governor_xp(db, int(up.city_id), 5)
 
         db.delete(up)
         completed += 1
@@ -725,6 +789,8 @@ def finalize_training_queue(db: Session, now: datetime) -> int:
 
         ct.count = int(getattr(ct, "count", 0) or 0) + int(tq.count)
 
+        _award_governor_xp(db, int(tq.city_id), 3)
+
         # 4) Mark completed
         tq.status = "completed"
         finalized += 1
@@ -784,6 +850,9 @@ def finalize_research_queue(db: Session, now: datetime) -> int:
             db.flush()
 
         row.level = max(int(row.level or 0), int(rq.to_level))
+
+        _award_governor_xp(db, int(rq.city_id), 8)
+
         rq.status = "completed"
         finalized += 1
 

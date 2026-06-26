@@ -929,6 +929,14 @@ def _build_combat_report(
     if not raid:
         raise HTTPException(status_code=404, detail="Raid not found")
 
+    hero_progress = None
+
+    if getattr(raid, "hero_progress_json", None):
+        try:
+            hero_progress = json.loads(raid.hero_progress_json)
+        except Exception:
+            hero_progress = None
+
     attacker = db.query(City).filter(City.id == raid.attacker_city_id).first()
     target = db.query(City).filter(City.id == raid.target_city_id).first()
 
@@ -1265,6 +1273,7 @@ def _build_combat_report(
                 "note": None if has_snapshot else "No defender snapshot available; defender damage breakdown omitted.",
             },
         },
+        "hero_progress": hero_progress,
     }
 
 @router.get("/{raid_id}/report")

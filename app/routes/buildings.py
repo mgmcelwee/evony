@@ -171,8 +171,12 @@ def preview_upgrade(
 
     cost = upgrade_cost(b.type, to_level)
     base_seconds = upgrade_time_seconds(b.type, to_level)
-    gov = _get_governor_building_bonus(db, int(city.id))
-    seconds = _apply_speed_bonus(base_seconds, int(gov["bonus"]))
+    governor, bonuses = get_city_governor_bonus(db, int(city.id))
+
+    building_bonus = int(bonuses.get("building_speed_bonus", 0) * 100)
+    building_bonus = max(0, min(building_bonus, 90))
+
+    seconds = _apply_speed_bonus(base_seconds, building_bonus)
 
     # Resource sufficiency breakdown
     insufficient = {}
@@ -194,11 +198,11 @@ def preview_upgrade(
         "cost": cost,
 	"base_duration_seconds": int(base_seconds),
 	"duration_seconds": int(seconds),
-	"governor_bonus": {
-    	"hero_id": gov["governor"].id if gov["governor"] else None,
-    	"name": gov["governor"].name if gov["governor"] else None,
-    	"building_speed_bonus": int(gov["bonus"]),
-	},
+        "governor_bonus": {
+            "hero_id": governor.id if governor else None,
+            "name": governor.name if governor else None,
+            "building_speed_bonus": building_bonus,
+        },
         "have_resources": len(insufficient) == 0,
         "insufficient": insufficient,
     }
@@ -454,8 +458,10 @@ def start_upgrade(
 
     started = datetime.utcnow()
     base_seconds = upgrade_time_seconds(b.type, to_level)
-    gov = _get_governor_building_bonus(db, int(city.id))
-    seconds = _apply_speed_bonus(base_seconds, int(gov["bonus"]))
+    governor, bonuses = get_city_governor_bonus(db, int(city.id))
+    building_bonus = int(bonuses.get("building_speed_bonus", 0) * 100)
+    building_bonus = max(0, min(building_bonus, 90))
+    seconds = _apply_speed_bonus(base_seconds, int(building_bonus))
     completes_at = datetime.utcnow() + timedelta(seconds=seconds)
 
     up = Upgrade(
@@ -488,10 +494,10 @@ def start_upgrade(
         "cost": cost,
 	"base_duration_seconds": int(base_seconds),
 	"duration_seconds": int(seconds),
-	"governor_bonus": {
-    	"hero_id": gov["governor"].id if gov["governor"] else None,
-    	"name": gov["governor"].name if gov["governor"] else None,
-    	"building_speed_bonus": int(gov["bonus"]),
+        "governor_bonus": {
+        "hero_id": governor.id if governor else None,
+        "name": governor.name if governor else None,
+        "building_speed_bonus": int(building_bonus),
 	},
         "completes_at": completes_at.isoformat(),
     }

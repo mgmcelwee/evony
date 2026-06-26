@@ -234,10 +234,11 @@ def train_preview(
 
     total_cost = _sum_cost(costs)
     afford = _check_affordable(city, total_cost)
-    gov = _get_governor_training_bonus(db, int(city.id))
+    governor, bonuses = get_city_governor_bonus(db, int(city.id))
+    governor_training_bonus = int(bonuses.get("training_speed_bonus", 0) * 100)
+    governor_training_bonus = max(0, min(governor_training_bonus, 90))
 
     barracks_level = int(rules.get("barracks_level", 1) or 1)
-    governor_training_bonus = int(gov["bonus"])
 
     base_duration_seconds = 0
     duration_seconds = 0
@@ -260,9 +261,9 @@ def train_preview(
         "have": afford["have"],
         "missing": afford["missing"],
         "governor_bonus": {
-            "hero_id": gov["governor"].id if gov["governor"] else None,
-            "name": gov["governor"].name if gov["governor"] else None,
-            "training_speed_bonus": gov["bonus"],
+            "hero_id": governor.id if governor else None,
+            "name": governor.name if governor else None,
+            "training_speed_bonus": governor_training_bonus,
         },
     }
 
@@ -497,8 +498,9 @@ def train_queue(
 
     now = datetime.utcnow()
     barracks_level = int(rules.get("barracks_level", 1) or 1)
-    gov = _get_governor_training_bonus(db, int(city.id))
-    governor_training_bonus = int(gov["bonus"])
+    governor, bonuses = get_city_governor_bonus(db, int(city.id))
+    governor_training_bonus = int(bonuses.get("training_speed_bonus", 0) * 100)
+    governor_training_bonus = max(0, min(governor_training_bonus, 90))
 
     # compute costs + affordability (charge immediately)
     breakdown = []
@@ -613,9 +615,9 @@ def train_queue(
         },
         "note": "Troops will appear after finishes_at when a tick occurs (any tick-on-read endpoint).",
         "governor_bonus": {
-            "hero_id": gov["governor"].id if gov["governor"] else None,
-            "name": gov["governor"].name if gov["governor"] else None,
-            "training_speed_bonus": gov["bonus"],
+            "hero_id": governor.id if governor else None,
+            "name": governor.name if governor else None,
+            "training_speed_bonus": governor_training_bonus,
         },
     }
 

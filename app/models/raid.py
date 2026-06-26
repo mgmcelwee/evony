@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Column
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -27,6 +27,8 @@ class Raid(Base):
     stolen_wood: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     stolen_stone: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     stolen_iron: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    hero_progress_json = Column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
