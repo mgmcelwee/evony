@@ -161,30 +161,7 @@ def _award_governor_xp(db: Session, city_id: int, amount: int) -> dict | None:
     if not hero:
         return None
 
-    level_before = int(hero.level or 1)
-    xp_before = int(hero.xp or 0)
-
-    result = add_hero_xp(hero, int(amount))
-
-    level_after = int(hero.level or level_before)
-    current_level_xp = int(hero.xp or 0)
-
-    progress = {
-        "hero_id": int(hero.id),
-        "name": hero.name,
-        "specialty": hero.specialty,
-        "level": level_before,
-        "xp_before": xp_before,
-        "xp_awarded": int(amount),
-        "current_level_xp": current_level_xp,
-        "xp_to_next_level": int(result.get("next_level_xp", 0)) - current_level_xp,
-        "leveled_up": bool(result.get("leveled_up", 0)),
-    }
-
-    if level_after > level_before:
-        progress["new_level"] = level_after
-
-    return progress
+    return add_hero_xp(hero, int(amount))
 
 # ----------------------------
 # Raids: helpers

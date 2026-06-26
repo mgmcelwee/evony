@@ -9,6 +9,7 @@ from app.models.hero import Hero
 from app.routes.auth import get_current_user
 from app.routes.buildings import _get_city_or_404
 from app.game.hero_specialties import calculate_hero_bonuses
+from app.game.hero_progression import level_progress
 
 router = APIRouter(
     prefix="/cities",
@@ -21,7 +22,8 @@ def _hero_to_dict(hero: Hero) -> dict:
         "city_id": int(hero.city_id),
         "name": hero.name,
         "level": int(hero.level),
-        "xp": int(hero.xp),
+        "current_level_xp": int(hero.xp),
+        "level_progress": level_progress(hero),
         "status": hero.status,
 	"specialty": hero.specialty,
         "bonuses": {

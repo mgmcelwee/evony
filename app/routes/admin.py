@@ -23,6 +23,8 @@ from app.game.hero_specialties import (
     calculate_hero_bonuses,
 )
 from app.game.research_rules import RESEARCH
+from app.game.hero_progression import level_progress
+
 from app.routes.research import ResearchSetRequest
 from app.routes.cities import TroopsSetPayload
 from app.routes.training import (
@@ -81,7 +83,8 @@ def _hero_to_dict(hero: Hero) -> dict:
         "city_id": int(hero.city_id),
         "name": hero.name,
         "level": int(hero.level),
-        "xp": int(hero.xp),
+        "curretn_level_xp": int(hero.xp),
+        "level_progress": level_progress(hero),
         "status": hero.status,
 	"specialty": hero.specialty,
         "bonuses": {
