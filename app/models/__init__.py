@@ -10,6 +10,7 @@ from app.models.raid_troop import RaidTroop
 from app.models.raid_defender_troop import RaidDefenderTroop
 from app.models.mail_message import MailMessage
 from app.models.hero import Hero
+from app.models.hero_assignment import HeroAssignment
 
 # Research
 from app.models.research import Research
